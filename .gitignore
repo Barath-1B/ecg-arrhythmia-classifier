@@ -1,0 +1,29 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.venv/
+venv/
+env/
+
+# Node
+frontend/node_modules/
+frontend/dist/
+frontend/package-lock.json
+
+# IDE / OS
+.cursor/
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+
+# Large training data (download with: python -c "import wfdb; wfdb.dl_database('mitdb', 'data/mit-bih-arrhythmia-database-1.0.0')")
+data/mit-bih-arrhythmia-database-1.0.0/
+data/mit-bih-arrhythmia-database-1.0.0.zip
+data/ecg_dataset_cache.npz
+
+# Internal session files (not part of the project)
+docs/
+ECG_Project_Report.docx

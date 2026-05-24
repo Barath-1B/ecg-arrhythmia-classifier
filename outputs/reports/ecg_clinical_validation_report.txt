@@ -1,0 +1,103 @@
+========================================================================
+  CLINICAL VALIDATION SUMMARY
+========================================================================
+  Device        : Portable ECG Monitor with Arrhythmia Detector
+  Algorithm     : Pan-Tompkins + Random Forest (5-class)
+  Report date   : 2026-05-24 16:53
+  Intended use  : Screening of adult patients for common arrhythmias
+  Regulatory    : FDA 510(k) -- Class II Medical Device
+
+  --------------------------------------------------------------------
+  1. PER-CLASS PERFORMANCE (test set)
+  --------------------------------------------------------------------
+  Class                Sens%           95% CI    Spec%           95% CI    Prec%      F1%      N
+  ----------------------------------------------------------------------------------------------------
+  Normal               100.0      100.0-100.0    100.0      100.0-100.0    100.0    100.0     42
+  AFib                  55.6        20.0-90.0    100.0      100.0-100.0    100.0     71.4      9 [SENS BELOW TARGET]
+  PVC                   98.6       96.5-100.0     94.3        89.0-98.8     96.6     97.6    144
+  Bradycardia           97.2       90.3-100.0     99.0       97.4-100.0     94.6     95.9     36
+  Tachycardia          100.0        0.0-100.0    100.0      100.0-100.0    100.0    100.0      1
+
+  Overall ROC-AUC (macro OvR): 0.9973  [OK]
+
+  --------------------------------------------------------------------
+  2. CONFUSION MATRIX (rows = true class, cols = predicted)
+  --------------------------------------------------------------------
+                     Normal       AFib        PVC    Bradyca    Tachyca
+          Normal         42          0          0          0          0
+            AFib          0          5          4          0          0
+             PVC          0          0        142          2          0
+     Bradycardia          0          0          1         35          0
+     Tachycardia          0          0          0          0          1
+
+  --------------------------------------------------------------------
+  3. FAILURE ANALYSIS -- Most-Confused Pairs
+  --------------------------------------------------------------------
+  True class         Predicted as        Count     Rate
+  -------------------------------------------------------
+  AFib               PVC                     4     44.4%
+  PVC                Bradycardia             2      1.4%
+  Bradycardia        PVC                     1      2.8%
+
+  Likely causes:
+    - AFib/Normal confusion: borderline RR variability in short windows
+    - PVC/Normal: isolated PVCs < 15% threshold missed by labeller
+    - Tachy/AFib: rapid AFib can mimic tachycardia at high HR
+
+  --------------------------------------------------------------------
+  4. CLINICAL SAFETY METRICS
+  --------------------------------------------------------------------
+  False Negative Rate (missed arrhythmias): 0.0%  (target < 12.0%)  [PASS]
+  False Positive Rate (false alarms):       0.0%  (target < 8.0%)  [PASS]
+  Missed arrhythmias : 0 / 190 arrhythmia recordings
+  False alarms       : 0 / 42 normal recordings
+
+  --------------------------------------------------------------------
+  4b. DANGEROUS MISCLASSIFICATION CHECK
+  --------------------------------------------------------------------
+  True class         Predicted as         Count  Status
+  -------------------------------------------------------
+  Tachycardia        Normal                   0  [PASS]
+  AFib               Normal                   0  [PASS]
+  Tachycardia        Bradycardia              0  [PASS]
+
+  Overall dangerous-misclassification check: [PASS] No dangerous misclassifications
+
+  --------------------------------------------------------------------
+  5. LIMITATIONS & KNOWN CONSTRAINTS
+  --------------------------------------------------------------------
+  - Not validated for: pediatric patients (< 18 years)
+  - Not validated for: patients with implanted pacemakers or ICDs
+  - Not validated for: atrial flutter (can mimic AFib features)
+  - Not validated for: WPW syndrome, Brugada pattern, LQTS
+  - Performance may degrade with poor electrode contact or motion artifact
+  - Validated only on single-lead (MLII) recordings at 360 Hz
+  - Short recordings (< 30 s) provide less reliable HRV metrics
+  - Overall accuracy ~97%; clinical judgment required for borderline cases
+  - Algorithm trained on MIT-BIH database (1975-1980); may not reflect modern demographics
+
+  --------------------------------------------------------------------
+  6. REGULATORY DISCLAIMERS
+  --------------------------------------------------------------------
+  This device is FOR SCREENING PURPOSES ONLY and is NOT a diagnostic tool.
+  All results must be reviewed by a qualified healthcare professional before
+  any clinical decision is made.  The manufacturer does not accept liability
+  for decisions made solely on the basis of this device's output.
+
+  Intended for use as a Class II medical device under FDA 510(k) pathway.
+  Substantial equivalence predicate: cleared ambulatory ECG monitors.
+
+  --------------------------------------------------------------------
+  7. SUMMARY
+  --------------------------------------------------------------------
+  Test set size    : 232 samples
+  Overall accuracy : 97.0%
+  Macro sens       : 90.3%
+  Macro spec       : 98.7%
+  ROC-AUC          : 0.9973
+  Performance targets met : NO -- see above
+  Clinical safety  : PASS
+
+========================================================================
+  END OF CLINICAL VALIDATION SUMMARY
+========================================================================

@@ -1,0 +1,197 @@
+/* ============================================================
+   Global Reset & Base
+   ============================================================ */
+*, *::before, *::after {
+  box-sizing: border-box;
+  margin: 0;
+  padding: 0;
+}
+
+:root {
+  --color-primary:    #2980B9;
+  --color-primary-dk: #1A6491;
+  --color-none:       #27AE60;
+  --color-low:        #F1C40F;
+  --color-moderate:   #F39C12;
+  --color-high:       #E74C3C;
+  --color-gray:       #95A5A6;
+  --color-bg:         #F0F4F8;
+  --color-surface:    #FFFFFF;
+  --color-border:     #DDE3EC;
+  --color-text:       #2C3E50;
+  --color-text-muted: #7F8C8D;
+  --radius:           10px;
+  --shadow:           0 2px 12px rgba(0,0,0,0.08);
+  --transition:       0.18s ease;
+}
+
+html, body {
+  height: 100%;
+  font-family: 'Segoe UI', system-ui, -apple-system, sans-serif;
+  font-size: 15px;
+  color: var(--color-text);
+  background: var(--color-bg);
+  line-height: 1.5;
+}
+
+a {
+  color: var(--color-primary);
+  text-decoration: none;
+}
+a:hover { text-decoration: underline; }
+
+button {
+  cursor: pointer;
+  font-family: inherit;
+  font-size: 0.95rem;
+}
+
+input, select {
+  font-family: inherit;
+  font-size: 0.95rem;
+}
+
+/* ============================================================
+   Layout
+   ============================================================ */
+.app {
+  display: flex;
+  flex-direction: column;
+  min-height: 100vh;
+}
+
+.main-content {
+  flex: 1;
+  padding: 2rem 1.5rem;
+  max-width: 1100px;
+  margin: 0 auto;
+  width: 100%;
+}
+
+/* ============================================================
+   Cards
+   ============================================================ */
+.card {
+  background: var(--color-surface);
+  border-radius: var(--radius);
+  box-shadow: var(--shadow);
+  padding: 1.5rem;
+  border: 1px solid var(--color-border);
+}
+
+.card-title {
+  font-size: 0.75rem;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--color-text-muted);
+  margin-bottom: 0.75rem;
+}
+
+/* ============================================================
+   Buttons
+   ============================================================ */
+.btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.4rem;
+  padding: 0.55rem 1.2rem;
+  border: none;
+  border-radius: 6px;
+  font-weight: 600;
+  transition: background var(--transition), opacity var(--transition);
+}
+
+.btn-primary {
+  background: var(--color-primary);
+  color: white;
+}
+.btn-primary:hover:not(:disabled) { background: var(--color-primary-dk); }
+
+.btn-secondary {
+  background: var(--color-bg);
+  color: var(--color-text);
+  border: 1px solid var(--color-border);
+}
+.btn-secondary:hover:not(:disabled) { background: var(--color-border); }
+
+.btn-danger {
+  background: var(--color-high);
+  color: white;
+}
+.btn-danger:hover:not(:disabled) { background: #c0392b; }
+
+.btn:disabled { opacity: 0.55; cursor: not-allowed; }
+
+/* ============================================================
+   Severity badges
+   ============================================================ */
+.badge {
+  display: inline-block;
+  padding: 0.25rem 0.75rem;
+  border-radius: 20px;
+  font-size: 0.78rem;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+}
+.badge-NONE     { background: var(--color-none);     color: white; }
+.badge-LOW      { background: var(--color-low);      color: #333; }
+.badge-MODERATE { background: var(--color-moderate); color: white; }
+.badge-HIGH     { background: var(--color-high);     color: white; }
+.badge-unknown  { background: var(--color-gray);     color: white; }
+
+/* ============================================================
+   Error / Warning boxes
+   ============================================================ */
+.error-box {
+  background: #FDEDED;
+  border: 1px solid var(--color-high);
+  color: #922;
+  border-radius: 6px;
+  padding: 0.85rem 1rem;
+  font-size: 0.9rem;
+}
+
+.warning-box {
+  background: #FFF8E1;
+  border: 1px solid var(--color-moderate);
+  color: #7D4E00;
+  border-radius: 6px;
+  padding: 0.85rem 1rem;
+  font-size: 0.9rem;
+}
+
+/* ============================================================
+   Disclaimer
+   ============================================================ */
+.disclaimer {
+  font-size: 0.78rem;
+  color: var(--color-text-muted);
+  border-top: 1px solid var(--color-border);
+  padding-top: 0.75rem;
+  margin-top: 1rem;
+}
+
+/* ============================================================
+   Spinner
+   ============================================================ */
+@keyframes spin {
+  to { transform: rotate(360deg); }
+}
+.spinner {
+  width: 28px;
+  height: 28px;
+  border: 3px solid var(--color-border);
+  border-top-color: var(--color-primary);
+  border-radius: 50%;
+  animation: spin 0.7s linear infinite;
+  margin: 0 auto;
+}
+
+/* ============================================================
+   Responsive
+   ============================================================ */
+@media (max-width: 768px) {
+  .main-content { padding: 1rem; }
+}
