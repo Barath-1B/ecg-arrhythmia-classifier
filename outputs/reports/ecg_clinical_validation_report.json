@@ -1,108 +1,108 @@
 {
-  "timestamp": "2026-05-24T16:53:08.534992",
-  "test_samples": 232,
-  "accuracy_pct": 96.98,
-  "macro_sens_pct": 90.28,
-  "macro_spec_pct": 98.66,
-  "roc_auc": 0.9973,
+  "timestamp": "2026-07-08T20:47:35.205639",
+  "cv_samples": 4946,
+  "accuracy_pct": 79.07,
+  "macro_sens_pct": 39.71,
+  "macro_spec_pct": 90.36,
+  "roc_auc": 0.9149,
   "per_class": {
     "Normal": {
       "sensitivity": {
-        "value": 1.0,
-        "ci_low": 1.0,
-        "ci_high": 1.0
+        "value": 0.9169,
+        "ci_low": 0.9077,
+        "ci_high": 0.9259
       },
       "specificity": {
-        "value": 1.0,
-        "ci_low": 1.0,
-        "ci_high": 1.0
+        "value": 0.6394,
+        "ci_low": 0.6148,
+        "ci_high": 0.6637
       },
       "precision": {
-        "value": 1.0,
-        "ci_low": 1.0,
-        "ci_high": 1.0
+        "value": 0.8633,
+        "ci_low": 0.8521,
+        "ci_high": 0.8743
       },
       "f1": {
-        "value": 1.0,
-        "ci_low": 1.0,
-        "ci_high": 1.0
+        "value": 0.8893,
+        "ci_low": 0.8817,
+        "ci_high": 0.8969
       },
-      "support": 42
+      "support": 3526
     },
     "AFib": {
       "sensitivity": {
-        "value": 0.5556,
-        "ci_low": 0.2,
-        "ci_high": 0.9
+        "value": 0.5791,
+        "ci_low": 0.5349,
+        "ci_high": 0.624
       },
       "specificity": {
-        "value": 1.0,
-        "ci_low": 1.0,
-        "ci_high": 1.0
+        "value": 0.9805,
+        "ci_low": 0.9761,
+        "ci_high": 0.9843
       },
       "precision": {
-        "value": 1.0,
-        "ci_low": 1.0,
-        "ci_high": 1.0
+        "value": 0.7642,
+        "ci_low": 0.7201,
+        "ci_high": 0.8056
       },
       "f1": {
-        "value": 0.7143,
-        "ci_low": 0.3333,
-        "ci_high": 0.9474
+        "value": 0.6589,
+        "ci_low": 0.6208,
+        "ci_high": 0.6952
       },
-      "support": 9
+      "support": 487
     },
     "PVC": {
       "sensitivity": {
-        "value": 0.9861,
-        "ci_low": 0.9648,
-        "ci_high": 1.0
+        "value": 0.4895,
+        "ci_low": 0.4558,
+        "ci_high": 0.5231
       },
       "specificity": {
-        "value": 0.9432,
-        "ci_low": 0.8901,
-        "ci_high": 0.9882
+        "value": 0.9188,
+        "ci_low": 0.9106,
+        "ci_high": 0.9272
       },
       "precision": {
-        "value": 0.966,
-        "ci_low": 0.9329,
-        "ci_high": 0.9932
+        "value": 0.541,
+        "ci_low": 0.5061,
+        "ci_high": 0.5779
       },
       "f1": {
-        "value": 0.9759,
-        "ci_low": 0.9556,
-        "ci_high": 0.993
+        "value": 0.514,
+        "ci_low": 0.485,
+        "ci_high": 0.5444
       },
-      "support": 144
+      "support": 809
     },
     "Bradycardia": {
       "sensitivity": {
-        "value": 0.9722,
-        "ci_low": 0.9032,
-        "ci_high": 1.0
+        "value": 0.0,
+        "ci_low": 0.0,
+        "ci_high": 0.0
       },
       "specificity": {
-        "value": 0.9898,
-        "ci_low": 0.974,
-        "ci_high": 1.0
+        "value": 0.9793,
+        "ci_low": 0.9751,
+        "ci_high": 0.983
       },
       "precision": {
-        "value": 0.9459,
-        "ci_low": 0.862,
-        "ci_high": 1.0
+        "value": 0.0,
+        "ci_low": 0.0,
+        "ci_high": 0.0
       },
       "f1": {
-        "value": 0.9589,
-        "ci_low": 0.9,
-        "ci_high": 1.0
+        "value": 0.0,
+        "ci_low": 0.0,
+        "ci_high": 0.0
       },
-      "support": 36
+      "support": 119
     },
     "Tachycardia": {
       "sensitivity": {
-        "value": 1.0,
+        "value": 0.0,
         "ci_low": 0.0,
-        "ci_high": 1.0
+        "ci_high": 0.0
       },
       "specificity": {
         "value": 1.0,
@@ -110,105 +110,175 @@
         "ci_high": 1.0
       },
       "precision": {
-        "value": 1.0,
+        "value": 0.0,
         "ci_low": 0.0,
-        "ci_high": 1.0
+        "ci_high": 0.0
       },
       "f1": {
-        "value": 1.0,
+        "value": 0.0,
         "ci_low": 0.0,
-        "ci_high": 1.0
+        "ci_high": 0.0
       },
-      "support": 1
+      "support": 5
     }
   },
   "confusion_matrix": [
     [
-      42,
-      0,
-      0,
+      3233,
+      34,
+      168,
+      91,
+      0
+    ],
+    [
+      64,
+      282,
+      141,
       0,
       0
     ],
     [
+      351,
+      53,
+      396,
+      9,
+      0
+    ],
+    [
+      92,
       0,
+      27,
+      0,
+      0
+    ],
+    [
       5,
-      4,
+      0,
+      0,
       0,
       0
-    ],
-    [
-      0,
-      0,
-      142,
-      2,
-      0
-    ],
-    [
-      0,
-      0,
-      1,
-      35,
-      0
-    ],
-    [
-      0,
-      0,
-      0,
-      0,
-      1
     ]
   ],
   "failure_analysis": [
     {
+      "true_class": "PVC",
+      "pred_class": "Normal",
+      "count": 351,
+      "rate": 0.4339
+    },
+    {
+      "true_class": "Normal",
+      "pred_class": "PVC",
+      "count": 168,
+      "rate": 0.0476
+    },
+    {
       "true_class": "AFib",
       "pred_class": "PVC",
-      "count": 4,
-      "rate": 0.4444
+      "count": 141,
+      "rate": 0.2895
+    },
+    {
+      "true_class": "Bradycardia",
+      "pred_class": "Normal",
+      "count": 92,
+      "rate": 0.7731
+    },
+    {
+      "true_class": "Normal",
+      "pred_class": "Bradycardia",
+      "count": 91,
+      "rate": 0.0258
+    },
+    {
+      "true_class": "AFib",
+      "pred_class": "Normal",
+      "count": 64,
+      "rate": 0.1314
     },
     {
       "true_class": "PVC",
-      "pred_class": "Bradycardia",
-      "count": 2,
-      "rate": 0.0139
+      "pred_class": "AFib",
+      "count": 53,
+      "rate": 0.0655
+    },
+    {
+      "true_class": "Normal",
+      "pred_class": "AFib",
+      "count": 34,
+      "rate": 0.0096
     },
     {
       "true_class": "Bradycardia",
       "pred_class": "PVC",
-      "count": 1,
-      "rate": 0.0278
+      "count": 27,
+      "rate": 0.2269
+    },
+    {
+      "true_class": "PVC",
+      "pred_class": "Bradycardia",
+      "count": 9,
+      "rate": 0.0111
+    },
+    {
+      "true_class": "Tachycardia",
+      "pred_class": "Normal",
+      "count": 5,
+      "rate": 1.0
     }
   ],
   "dangerous_misclassifications": [
     {
+      "true": "AFib",
+      "pred": "Normal",
+      "count": 64,
+      "status": "FAIL"
+    },
+    {
+      "true": "PVC",
+      "pred": "Normal",
+      "count": 351,
+      "status": "FAIL"
+    },
+    {
+      "true": "Bradycardia",
+      "pred": "Normal",
+      "count": 92,
+      "status": "FAIL"
+    },
+    {
       "true": "Tachycardia",
       "pred": "Normal",
-      "count": 0,
-      "status": "PASS"
+      "count": 5,
+      "status": "FAIL"
     },
     {
       "true": "AFib",
-      "pred": "Normal",
-      "count": 0,
-      "status": "PASS"
+      "pred": "PVC",
+      "count": 141,
+      "status": "FAIL"
     },
     {
       "true": "Tachycardia",
-      "pred": "Bradycardia",
+      "pred": "PVC",
       "count": 0,
       "status": "PASS"
     }
   ],
   "clinical_safety": {
-    "false_negative_rate": 0.0,
-    "false_positive_rate": 0.0,
-    "missed_arrhythmias": 0,
-    "total_arrhythmias": 190,
-    "false_alarms": 0,
-    "total_normals": 42,
+    "false_negative_rate": 36.06,
+    "false_positive_rate": 8.31,
+    "missed_arrhythmias": 512,
+    "total_arrhythmias": 1420,
+    "false_alarms": 293,
+    "total_normals": 3526,
+    "arrhythmia_substitutions": 230,
+    "substitution_rate_pct": 16.2,
+    "misclassified_arrhythmias": 742,
+    "arrhythmia_error_rate_pct": 52.25,
     "fnr_target_pct": 12.0,
     "fpr_target_pct": 8.0,
-    "fnr_pass": true,
-    "fpr_pass": true
+    "fnr_pass": false,
+    "fpr_pass": false
   }
 }

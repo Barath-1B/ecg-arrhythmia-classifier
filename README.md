@@ -2,6 +2,7 @@
 
 > Upload a raw ECG recording, get a clinical-grade arrhythmia diagnosis in seconds.
 
+[![CI](https://github.com/Barath-1B/ecg-arrhythmia-classifier/actions/workflows/ci.yml/badge.svg)](https://github.com/Barath-1B/ecg-arrhythmia-classifier/actions/workflows/ci.yml)
 ![Python](https://img.shields.io/badge/Python-3.9%2B-blue)
 ![License](https://img.shields.io/badge/License-MIT-green)
 ![React](https://img.shields.io/badge/Frontend-React%2018-61dafb)
@@ -42,6 +43,8 @@ browse a history of past analyses.
 - **Flask REST API** — `POST /api/analyze` accepts a CSV upload, returns JSON
 - **React + Vite web UI** — upload form, results display, probability chart, patient history
 - **Phase 5 clinical validation** — bootstrap 95% confidence intervals, FDA 510(k)-style report
+- **67-test pytest suite + CI** — data-free tests (synthetic signals, mock model) run on every
+  push alongside `ruff` and a frontend build
 
 ---
 
@@ -60,8 +63,9 @@ Phase 2 ── Clinical decision rules
     │          VT    : HR > 120 AND QRS > 130 ms
     │          (src/ecg_phase2.py)
     │
-Phase 3 ── Random Forest (200 trees, grid-search tuned, stratified 5-fold CV)
+Phase 3 ── Random Forest, grid-search tuned (100 trees, max_depth 20)
     │          class_weight='balanced' | f1_weighted scoring
+    │          trained on Normal/AFib/PVC only (rate classes are rule-owned)
     │          (src/ecg_phase3.py  →  models/ecg_model.joblib)
     │
 Phase 5 ── Bootstrap clinical validation + FDA-ready report
@@ -80,33 +84,61 @@ React UI         ←  upload → results → probability chart → history
 
 ## Performance Metrics
 
-Evaluated on 232 held-out test samples from the MIT-BIH Arrhythmia Database (Phase 5 bootstrap validation).
+Evaluated by **5-fold record-level cross-validation** over **4,946 windows** from the MIT-BIH
+Arrhythmia Database. The split is grouped by patient record, so a patient's overlapping
+windows never appear in both training and evaluation (leakage-free). Every window is scored
+out-of-fold by a system that never saw its record. **The numbers below grade the hybrid
+pipeline that actually ships** — Phase 2 rules first, then the Random Forest fallback — not a
+bare model. They are copied verbatim from `outputs/reports/ecg_clinical_validation_report.json`
+(regenerate with `python run_all.py`).
 
-| Metric | Score |
-|--------|-------|
-| Overall Accuracy | **97.0%** |
-| Macro Sensitivity | **90.3%** |
-| Macro Specificity | **98.7%** |
-| ROC-AUC | **0.9973** |
+The classifier is split by design: the **ML model owns Normal / AFib / PVC** (all learnable,
+multi-record); the **deterministic rules own Bradycardia / Tachycardia** (rate-defined). See
+[Methodology](#methodology-why-this-approach) for why.
 
-Per-class results (bootstrap 95% CI):
+| Metric | Score | Target |
+|--------|-------|--------|
+| Overall accuracy (hybrid, 5 classes) | **79.1%** | — |
+| Macro sensitivity (5 classes) | **39.7%** | ≥ 85% — not met |
+| Macro specificity (5 classes) | **90.4%** | ≥ 90% — met |
+| **ML sub-model ROC-AUC** (Normal/AFib/PVC) | **0.915** | ≥ 0.90 — **met** |
 
-| Class | Sensitivity | Specificity | Precision | F1 | Support |
-|-------|-------------|-------------|-----------|-----|---------|
-| Normal | 100.0% (100–100%) | 100.0% (100–100%) | 100.0% | 1.000 | 42 |
-| AFib | 55.6% (20–90%) | 100.0% (100–100%) | 100.0% | 0.714 | 9 |
-| PVC | 98.6% (96.5–100%) | 94.3% (89–98.8%) | 96.6% | 0.976 | 144 |
-| Bradycardia | 97.2% (90.3–100%) | 99.0% (97.4–100%) | 94.6% | 0.959 | 36 |
-| Tachycardia | 100.0% (0–100%) | 100.0% (100–100%) | 100.0% | 1.000 | 1 |
+Per-class results (bootstrap 95% CI on out-of-fold predictions):
 
-> AFib sensitivity (55.6%) reflects limited training samples in MIT-BIH (~60 records).
-> The wide 95% CI (20–90%) is due to small test support (9 samples). A larger dataset
-> such as PTB-XL would improve AFib detection substantially.
+| Class | Owner | Sensitivity | Specificity | Precision | F1 | Support |
+|-------|-------|-------------|-------------|-----------|-----|---------|
+| Normal | ML | 91.7% (90.8–92.6%) | 63.9% (61.5–66.4%) | 86.3% | 0.889 | 3,526 |
+| AFib | ML | 57.9% (53.5–62.4%) | 98.1% (97.6–98.4%) | 76.4% | 0.659 | 487 |
+| PVC | ML | 49.0% (45.6–52.3%) | 91.9% (91.1–92.7%) | 54.1% | 0.514 | 809 |
+| Bradycardia | rules | 0.0% | 97.9% (97.5–98.3%) | 0.0% | 0.000 | 119 |
+| Tachycardia | rules | 0.0% | 100.0% | 0.0% | 0.000 | 5 |
 
-**Clinical safety checks (all PASS):**
-- False negative rate: 0% (target < 12%)
-- False positive rate: 0% (target < 8%)
-- Dangerous misclassifications (e.g. VT → Normal, AFib → Normal): 0
+> **Known limitations (read this).** This is an honest screening prototype, not a passing
+> medical device.
+> - **The ML sub-model is the strong part.** Restricting the Random Forest to the three
+>   learnable classes lifted its ROC-AUC from 0.80 to **0.915** (now above target) and AFib
+>   sensitivity from 45% to **58%**. PVC in 30-second windows stays hard (~49%): most missed
+>   PVCs fall below the 15%-ectopy labelling threshold and read as Normal.
+> - **Bradycardia and Tachycardia are near-zero, and that is the truthful number.** In
+>   MIT-BIH these rhythms come from a *single* record (232, ~59 bpm — borderline, above the
+>   `HR < 50` rule) and *three* records / 5 windows respectively. They are structurally
+>   unlearnable under record-grouped CV, so they are handed to the rate rules — which, on
+>   these specific borderline records, mostly do not fire. No amount of tuning fixes this on
+>   this dataset; it needs a larger, balanced corpus (e.g. PTB-XL, 21,837 records).
+> - **Macro sensitivity (39.7%) is low by construction**: it averages five classes, two of
+>   which are the structural zeros above.
+
+**Clinical safety checks (arrhythmia-vs-Normal), current run:**
+- False-negative rate (arrhythmia read as Normal): **36.1%** (512/1420) — target < 12% — **FAIL**
+- False-positive rate (Normal flagged): **8.3%** (293/3526) — target < 8% — **FAIL**
+- Overall clinical-safety gate: **FAIL** — appropriate for a research prototype that is *not*
+  FDA cleared. Do not read these numbers as clearance.
+
+> **Note on earlier figures.** Prior versions of this README reported 87.5% accuracy / 61.8%
+> macro sensitivity / 0.864 ROC-AUC over "1,546 windows." Those predated a rhythm-code
+> labelling correction (`(B`/`(T` are ventricular bigeminy/trigeminy → PVC, not brady/tachy),
+> which produced today's larger, Normal-dominated 4,946-window dataset. The old numbers were
+> never regenerated and are unreproducible; the figures above are the honest, current ones.
 
 ---
 
@@ -124,6 +156,15 @@ decision rules handle the unambiguous cases (extreme heart rates, wide QRS) with
 and full interpretability. The Random Forest steps in only when the rules are inconclusive, giving
 the best of both worlds: determinism where possible, learned generalisation where needed.
 
+**The two arrhythmia families are split on purpose.** Bradycardia and Tachycardia are defined by
+heart *rate*, and in MIT-BIH they come from just one and three records respectively — too few to
+learn under record-grouped cross-validation (any fold holding out that record trains on zero
+examples, guaranteeing 0% recall). So they are owned by the deterministic rate rules (`HR < 50`
+/ `HR > 120`), which are exactly the right tool for a rate threshold. The Random Forest trains
+only on Normal / AFib / PVC, which are multi-record and genuinely learnable; freeing it from the
+unlearnable classes is what raised its ROC-AUC to 0.915. The API/UI still expose all five classes
+— the model's probability vector is expanded to five columns and the rules fill the rate slots.
+
 ### MIT-BIH Arrhythmia Database
 MIT-BIH is the most widely cited ECG benchmark in the literature (5000+ publications). It contains
 48 half-hour two-lead recordings sampled at 360 Hz, annotated beat-by-beat by cardiologists — the
@@ -135,7 +176,7 @@ Random Forest was chosen for three reasons:
    which is essential for building trust in a medical screening tool.
 2. **Dataset size** — deep learning models (CNNs, Transformers) need tens of thousands of labelled
    recordings to outperform classical ML; MIT-BIH is too small.
-3. **Portability** — the serialised model (`ecg_model.joblib`, 1.5 MB) runs on any CPU; no GPU,
+3. **Portability** — the serialised model (`ecg_model.joblib`, ~3 MB) runs on any CPU; no GPU,
    no inference server, no cloud dependency.
 
 ---
@@ -151,16 +192,15 @@ Random Forest was chosen for three reasons:
 | **More arrhythmia classes** | Atrial Flutter, 2nd/3rd-degree AV block, LBBB/RBBB |
 | **Automated signal quality scoring** | Reject noisy or lead-off recordings before classification |
 | **Real database for history** | Replace `localStorage` with SQLite / PostgreSQL for longitudinal tracking |
-| **Pytest suite** | Unit tests for feature extraction and edge-case classifier inputs |
 | **Docker / docker-compose** | One-command startup for backend + frontend |
-| **CI/CD with GitHub Actions** | Automated lint, test, and model benchmark on every push |
+| **Model benchmark in CI** | Extend the existing lint/test workflow to gate on validation metrics |
 
 ---
 
 ## Project Structure
 
 ```
-ecg-arrhythmia-monitor/
+ecg-arrhythmia-classifier/
 ├── src/
 │   ├── ecg_phase1.py               # Data loading, Pan-Tompkins, feature extraction
 │   ├── ecg_phase2.py               # Clinical decision-rule classifier
@@ -170,7 +210,7 @@ ecg-arrhythmia-monitor/
 ├── backend/
 │   ├── app.py                      # Flask REST API
 │   ├── config.py                   # Constants (sampling rate, model path, etc.)
-│   └── requirements.txt            # Flask-only deps (see root requirements.txt for all)
+│   └── requirements.txt            # -r ../requirements.txt (full deps; app.py needs them)
 ├── frontend/
 │   ├── src/
 │   │   ├── App.jsx                 # React router
@@ -182,13 +222,24 @@ ecg-arrhythmia-monitor/
 │   ├── index.html
 │   ├── package.json
 │   └── vite.config.js
+├── tests/                          # Pytest suite (data-free: synthetic signals + mock model)
+│   ├── test_classify_ecg.py        # Phase 2 clinical decision rules
+│   ├── test_predict_combined.py    # Rules ↔ ML merge and fallback logic
+│   ├── test_diagnosis_mapping.py   # Rule-name → canonical-label mapping
+│   ├── test_signal_processing.py   # R-peak detection, entropy
+│   ├── test_signal_quality.py      # Signal-quality gating and loading
+│   └── test_backend_api.py         # Flask endpoints
 ├── models/
-│   └── ecg_model.joblib            # Trained Random Forest (1.5 MB, included)
+│   └── ecg_model.joblib            # Trained Random Forest (~3 MB, 3-class, included)
 ├── outputs/
 │   ├── plots/                      # Example: confusion matrix, ROC curves, feature importance
 │   └── reports/                    # Example: metrics JSON, clinical validation report
+├── .github/workflows/ci.yml        # CI: ruff + pytest + frontend build
 ├── run_all.py                      # Master runner (Phases 1 → 2 → 3 → 5)
+├── conftest.py                     # Pytest bootstrap
+├── pyproject.toml                  # Pytest + ruff config (puts src/ and backend/ on the path)
 ├── requirements.txt                # All Python dependencies
+├── requirements-dev.txt            # pytest + ruff, on top of the root deps
 ├── LICENSE
 └── README.md
 ```
@@ -205,7 +256,7 @@ ecg-arrhythmia-monitor/
 
 ```bash
 git clone https://github.com/Barath-1B/ecg-arrhythmia-classifier.git
-cd ecg-arrhythmia-monitor
+cd ecg-arrhythmia-classifier
 ```
 
 ### 2. Set up Python environment
@@ -268,19 +319,45 @@ npm run dev
 # Opens at http://localhost:5173
 ```
 
+### 8. Run the tests
+
+The test suite is data-free (synthetic signals + a mock model), so it needs
+neither the MIT-BIH download nor a trained model on disk.
+
+```bash
+pip install -r requirements-dev.txt   # pytest + ruff, on top of the root deps
+pytest                                 # whole suite, from the repo root
+ruff check .                           # lint
+pytest tests/test_classify_ecg.py      # a single file
+```
+
+`pyproject.toml` puts `src/` and `backend/` on the path, so tests import the
+phase modules and the Flask app directly. CI (`.github/workflows/ci.yml`) runs
+`ruff` + `pytest` and a frontend `npm run build` on every push and PR.
+
 ---
 
 ## API Reference
 
 ### `GET /api/health`
 
-Liveness check. Returns `{"status": "ok"}`.
+Liveness check. Reports whether the model loaded at startup:
+
+```json
+{ "status": "ok", "model_loaded": true, "timestamp": "2026-07-08T20:47:35.205639" }
+```
 
 ### `POST /api/analyze`
 
 Upload a raw ECG CSV for analysis.
 
-**Request:** `multipart/form-data` with a `file` field (CSV, max 16 MB)
+**Request:** `multipart/form-data` with:
+
+| Field | Required | Notes |
+|-------|----------|-------|
+| `file` | yes | Single-column CSV of raw voltage samples, max 16 MB |
+| `patient_id` | no | Echoed back in the report |
+| `sampling_rate` | no | One of `256` / `360` / `500` (default `360`); anything else is rejected with 400 |
 
 **Response:**
 
@@ -307,7 +384,7 @@ Upload a raw ECG CSV for analysis.
     "Bradycardia": 0.02,
     "Tachycardia": 0.01
   },
-  "disclaimer": "FOR SCREENING PURPOSES ONLY. Not a diagnostic tool."
+  "disclaimer": "⚠️  FOR SCREENING PURPOSES ONLY. This device is NOT a diagnostic tool. Results must be reviewed by a qualified healthcare professional before any clinical decision is made. Do not use as a substitute for professional medical advice, diagnosis, or treatment."
 }
 ```
 

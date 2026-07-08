@@ -39,13 +39,16 @@ _ROOT = os.path.dirname(_HERE)
 sys.path.insert(0, os.path.join(_ROOT, "src"))
 
 from ecg_analyzer import predict_combined, check_signal_quality
-from config import DEFAULT_SAMPLING_RATE, PATIENT_ID_DEFAULT, MODEL_FILENAME
+from config import (
+    DEFAULT_SAMPLING_RATE, PATIENT_ID_DEFAULT, MODEL_FILENAME,
+    ALLOWED_SAMPLING_RATES, MAX_SIGNAL_SAMPLES, CORS_ORIGINS,
+)
 
 # ---------------------------------------------------------------------------
 # App setup
 # ---------------------------------------------------------------------------
 app = Flask(__name__)
-CORS(app)
+CORS(app, origins=CORS_ORIGINS)
 app.config['MAX_CONTENT_LENGTH'] = 16 * 1024 * 1024  # 16 MB max upload size
 
 # Load the trained model once at startup
@@ -81,9 +84,33 @@ class _SafeEncoder(json.JSONEncoder):
         return super().default(obj)
 
 
+def _sanitize(obj):
+    """Recursively replace non-finite floats (NaN/Inf) with None.
+
+    _SafeEncoder.default() is only invoked for types the C encoder can't handle;
+    a plain Python float('nan') is emitted as the bare token `NaN`, which is
+    invalid JSON. Pre-cleaning here (plus allow_nan=False below as a backstop)
+    guarantees every float in the payload is finite or null.
+    """
+    if isinstance(obj, dict):
+        return {k: _sanitize(v) for k, v in obj.items()}
+    if isinstance(obj, (list, tuple)):
+        return [_sanitize(v) for v in obj]
+    if isinstance(obj, (np.floating, float)):
+        f = float(obj)
+        return None if (math.isnan(f) or math.isinf(f)) else f
+    if isinstance(obj, np.integer):
+        return int(obj)
+    if isinstance(obj, np.ndarray):
+        return _sanitize(obj.tolist())
+    return obj
+
+
 def _json_response(data, status=200):
+    # allow_nan=False makes a stray non-finite float raise rather than silently
+    # emit invalid JSON; _sanitize should already have removed them.
     return app.response_class(
-        response=json.dumps(data, cls=_SafeEncoder),
+        response=json.dumps(_sanitize(data), cls=_SafeEncoder, allow_nan=False),
         status=status,
         mimetype="application/json",
     )
@@ -111,6 +138,11 @@ def analyze():
     except ValueError:
         return _json_response({"error": "sampling_rate must be an integer"}, 400)
 
+    if sr not in ALLOWED_SAMPLING_RATES:
+        return _json_response({
+            "error": f"sampling_rate must be one of {list(ALLOWED_SAMPLING_RATES)}"
+        }, 400)
+
     if "file" not in request.files:
         return _json_response({"error": "No file uploaded. Send field name 'file'."}, 400)
 
@@ -118,22 +150,24 @@ def analyze():
     if file.filename == "":
         return _json_response({"error": "Empty filename"}, 400)
 
-    # ---- Load CSV -------------------------------------------------------
+    # ---- Load CSV (same parse as ecg_analyzer.load_ecg_csv) --------------
     try:
         raw = file.read().decode("utf-8", errors="replace")
-        # Strip comment lines and parse
-        lines = [l.strip() for l in raw.splitlines() if l.strip() and not l.startswith("#")]
-        # Handle multi-column CSV: take first column
-        values = []
-        for line in lines:
-            parts = line.split(",")
-            values.append(float(parts[0]))
-        signal = np.array(values, dtype=np.float64)
+        signal = np.atleast_1d(np.loadtxt(io.StringIO(raw), delimiter=",", comments="#"))
+        if signal.ndim > 1:
+            signal = signal[:, 0]   # multi-column CSV: take first column
+        signal = signal.astype(np.float64)
     except Exception as e:
         return _json_response({"error": f"File parse error: {e}"}, 400)
 
-    if len(signal) == 0:
+    if signal.size == 0:
         return _json_response({"error": "File is empty or contains no numeric data"}, 400)
+
+    # Bound the compute per request: truncate an oversized signal so the DSP and
+    # entropy can't run over millions of samples and tie up the worker.
+    if signal.size > MAX_SIGNAL_SAMPLES:
+        print(f"[analyze] Signal truncated: {signal.size} -> {MAX_SIGNAL_SAMPLES} samples")
+        signal = signal[:MAX_SIGNAL_SAMPLES]
 
     # ---- Signal quality check -------------------------------------------
     quality_err = check_signal_quality(signal, sr)

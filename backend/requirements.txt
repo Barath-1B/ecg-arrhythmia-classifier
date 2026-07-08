@@ -1,2 +1,5 @@
-flask>=3.0
-flask-cors>=4.0
+# The backend imports ecg_analyzer -> ecg_phase1, which pull in numpy, scipy,
+# scikit-learn, wfdb, matplotlib and joblib. Installing only Flask here yields an
+# ImportError at startup, so depend on the full root requirements rather than a
+# misleading Flask-only subset.
+-r ../requirements.txt

@@ -1,8 +1,6 @@
 // ECG file validation utilities
 import { ALLOWED_FILE_TYPES } from '../constants'
 
-const MIN_DURATION_SECONDS = 10
-
 export function readFileAsText(file) {
   return new Promise((resolve, reject) => {
     const reader = new FileReader()
@@ -28,39 +26,16 @@ export function validateECGFile(file, samplingRate) {
 }
 
 export async function parseAndValidateECGContent(text, samplingRate) {
-  // Parse CSV: strip comments, split lines, filter empty
+  // Parse CSV for the upload preview only (row count + duration).
+  // The server enforces min-duration and numeric validation on analyze.
   const lines = text
     .split('\n')
     .map(l => l.trim())
     .filter(l => l && !l.startsWith('#'))
 
-  // Check minimum duration (10 seconds at sampling rate)
-  const minRows = Math.ceil(MIN_DURATION_SECONDS * samplingRate)
-  if (lines.length < minRows) {
-    throw new Error(
-      `File too small: ${lines.length} samples detected. ` +
-      `Need at least ${minRows} rows (${MIN_DURATION_SECONDS} seconds at ${samplingRate} Hz).`
-    )
-  }
-
-  // Validate numeric data: check first 20 lines
-  const sample = lines.slice(0, 20)
-  const badLine = sample.find(l => {
-    const first = l.split(',')[0].trim()
-    return first && isNaN(parseFloat(first))
-  })
-  if (badLine) {
-    throw new Error(
-      `File contains non-numeric data: "${badLine.substring(0, 40)}"`
-    )
-  }
-
-  // Calculate duration
-  const durationSec = (lines.length / samplingRate).toFixed(1)
-
   return {
     lines,
-    duration: durationSec,
+    duration: (lines.length / samplingRate).toFixed(1),
     rowCount: lines.length,
   }
 }

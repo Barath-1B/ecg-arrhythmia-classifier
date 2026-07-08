@@ -2,42 +2,55 @@
   CLINICAL VALIDATION SUMMARY
 ========================================================================
   Device        : Portable ECG Monitor with Arrhythmia Detector
-  Algorithm     : Pan-Tompkins + Random Forest (5-class)
-  Report date   : 2026-05-24 16:53
-  Intended use  : Screening of adult patients for common arrhythmias
-  Regulatory    : FDA 510(k) -- Class II Medical Device
+  Algorithm     : Pan-Tompkins + hybrid (Phase 2 rules -> Random Forest)
+                  ML owns Normal/AFib/PVC; rules own Bradycardia/Tachycardia
+  Report date   : 2026-07-08 20:47
+  Intended use  : Research/education screening prototype (adults)
+  Regulatory    : NOT FDA cleared -- not a medical device
 
   --------------------------------------------------------------------
-  1. PER-CLASS PERFORMANCE (test set)
+  1. PER-CLASS PERFORMANCE (5-fold record-level cross-validation, out-of-fold)
   --------------------------------------------------------------------
+  Leakage-free: a patient's overlapping windows never span train/test.
+  Metrics are for the HYBRID pipeline that ships (rules -> ML fallback).
+  Normal/AFib/PVC are ML-decided; Bradycardia/Tachycardia are rule-decided
+  (rate rules): their sensitivity reflects how often the HR rule fires on
+  MIT-BIH's few, borderline rate-class records, not an ML failure.
   Class                Sens%           95% CI    Spec%           95% CI    Prec%      F1%      N
   ----------------------------------------------------------------------------------------------------
-  Normal               100.0      100.0-100.0    100.0      100.0-100.0    100.0    100.0     42
-  AFib                  55.6        20.0-90.0    100.0      100.0-100.0    100.0     71.4      9 [SENS BELOW TARGET]
-  PVC                   98.6       96.5-100.0     94.3        89.0-98.8     96.6     97.6    144
-  Bradycardia           97.2       90.3-100.0     99.0       97.4-100.0     94.6     95.9     36
-  Tachycardia          100.0        0.0-100.0    100.0      100.0-100.0    100.0    100.0      1
+  Normal                91.7        90.8-92.6     63.9        61.5-66.4     86.3     88.9   3526 [SPEC BELOW TARGET]
+  AFib                  57.9        53.5-62.4     98.0        97.6-98.4     76.4     65.9    487 [SENS BELOW TARGET]
+  PVC                   48.9        45.6-52.3     91.9        91.1-92.7     54.1     51.4    809 [SENS BELOW TARGET]
+  Bradycardia            0.0          0.0-0.0     97.9        97.5-98.3      0.0      0.0    119 [rule-owned] [SENS BELOW TARGET]
+  Tachycardia            0.0          0.0-0.0    100.0      100.0-100.0      0.0      0.0      5 [rule-owned] [SENS BELOW TARGET]
 
-  Overall ROC-AUC (macro OvR): 0.9973  [OK]
+  ML sub-model ROC-AUC (Normal/AFib/PVC, macro OvR): 0.9149  [OK]
 
   --------------------------------------------------------------------
   2. CONFUSION MATRIX (rows = true class, cols = predicted)
   --------------------------------------------------------------------
                      Normal       AFib        PVC    Bradyca    Tachyca
-          Normal         42          0          0          0          0
-            AFib          0          5          4          0          0
-             PVC          0          0        142          2          0
-     Bradycardia          0          0          1         35          0
-     Tachycardia          0          0          0          0          1
+          Normal       3233         34        168         91          0
+            AFib         64        282        141          0          0
+             PVC        351         53        396          9          0
+     Bradycardia         92          0         27          0          0
+     Tachycardia          5          0          0          0          0
 
   --------------------------------------------------------------------
   3. FAILURE ANALYSIS -- Most-Confused Pairs
   --------------------------------------------------------------------
   True class         Predicted as        Count     Rate
   -------------------------------------------------------
-  AFib               PVC                     4     44.4%
-  PVC                Bradycardia             2      1.4%
-  Bradycardia        PVC                     1      2.8%
+  PVC                Normal                351     43.4%
+  Normal             PVC                   168      4.8%
+  AFib               PVC                   141     28.9%
+  Bradycardia        Normal                 92     77.3%
+  Normal             Bradycardia            91      2.6%
+  AFib               Normal                 64     13.1%
+  PVC                AFib                   53      6.6%
+  Normal             AFib                   34      1.0%
+  Bradycardia        PVC                    27     22.7%
+  PVC                Bradycardia             9      1.1%
 
   Likely causes:
     - AFib/Normal confusion: borderline RR variability in short windows
@@ -47,21 +60,29 @@
   --------------------------------------------------------------------
   4. CLINICAL SAFETY METRICS
   --------------------------------------------------------------------
-  False Negative Rate (missed arrhythmias): 0.0%  (target < 12.0%)  [PASS]
-  False Positive Rate (false alarms):       0.0%  (target < 8.0%)  [PASS]
-  Missed arrhythmias : 0 / 190 arrhythmia recordings
-  False alarms       : 0 / 42 normal recordings
+  False Negative Rate (missed arrhythmias): 36.1%  (target < 12.0%)  [FAIL]
+  False Positive Rate (false alarms):       8.3%  (target < 8.0%)  [FAIL]
+  Missed arrhythmias : 512 / 1420 arrhythmia recordings
+  False alarms       : 293 / 3526 normal recordings
+  Arrhythmia -> wrong arrhythmia (e.g. AFib->PVC): 230 (16.2% of arrhythmias)
+  Total arrhythmia error (missed + substituted): 742 / 1420 (52.2%)
+  NOTE: FNR above counts only arrhythmia->Normal. A substitution keeps
+  a non-Normal label yet can still change management, so it is reported
+  separately here rather than folded into a single PASS/FAIL.
 
   --------------------------------------------------------------------
   4b. DANGEROUS MISCLASSIFICATION CHECK
   --------------------------------------------------------------------
   True class         Predicted as         Count  Status
   -------------------------------------------------------
-  Tachycardia        Normal                   0  [PASS]
-  AFib               Normal                   0  [PASS]
-  Tachycardia        Bradycardia              0  [PASS]
+  AFib               Normal                  64  [FAIL]
+  PVC                Normal                 351  [FAIL]
+  Bradycardia        Normal                  92  [FAIL]
+  Tachycardia        Normal                   5  [FAIL]
+  AFib               PVC                    141  [FAIL]
+  Tachycardia        PVC                      0  [PASS]
 
-  Overall dangerous-misclassification check: [PASS] No dangerous misclassifications
+  Overall dangerous-misclassification check: [FAIL] See above
 
   --------------------------------------------------------------------
   5. LIMITATIONS & KNOWN CONSTRAINTS
@@ -73,7 +94,7 @@
   - Performance may degrade with poor electrode contact or motion artifact
   - Validated only on single-lead (MLII) recordings at 360 Hz
   - Short recordings (< 30 s) provide less reliable HRV metrics
-  - Overall accuracy ~97%; clinical judgment required for borderline cases
+  - Overall accuracy ~79%; clinical judgment required for borderline cases
   - Algorithm trained on MIT-BIH database (1975-1980); may not reflect modern demographics
 
   --------------------------------------------------------------------
@@ -81,22 +102,23 @@
   --------------------------------------------------------------------
   This device is FOR SCREENING PURPOSES ONLY and is NOT a diagnostic tool.
   All results must be reviewed by a qualified healthcare professional before
-  any clinical decision is made.  The manufacturer does not accept liability
-  for decisions made solely on the basis of this device's output.
+  any clinical decision is made.  The authors accept no liability for
+  decisions made solely on the basis of this software's output.
 
-  Intended for use as a Class II medical device under FDA 510(k) pathway.
-  Substantial equivalence predicate: cleared ambulatory ECG monitors.
+  This is a research/education prototype. It is NOT FDA cleared, NOT a
+  medical device, and has NO substantial-equivalence predicate. The
+  report format is FDA-510(k)-inspired for educational purposes only.
 
   --------------------------------------------------------------------
   7. SUMMARY
   --------------------------------------------------------------------
-  Test set size    : 232 samples
-  Overall accuracy : 97.0%
-  Macro sens       : 90.3%
-  Macro spec       : 98.7%
-  ROC-AUC          : 0.9973
+  CV samples (OOF) : 4946 samples
+  Overall accuracy : 79.1%
+  Macro sens       : 39.7%
+  Macro spec       : 90.4%
+  ML ROC-AUC       : 0.9149  (Normal/AFib/PVC)
   Performance targets met : NO -- see above
-  Clinical safety  : PASS
+  Clinical safety  : FAIL
 
 ========================================================================
   END OF CLINICAL VALIDATION SUMMARY

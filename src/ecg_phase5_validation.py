@@ -1,9 +1,10 @@
 # -*- coding: utf-8 -*-
 """
-ECG Monitor - Phase 5: Clinical Validation & FDA Documentation
+ECG Monitor - Phase 5: Clinical Validation Report
 ==============================================================
-Generates a professional Clinical Validation Summary report suitable
-for inclusion in an FDA 510(k) premarket notification.
+Generates a Clinical Validation Summary for this research/screening
+prototype. This device is NOT FDA cleared and the report is not a
+regulatory submission; the format is FDA-510(k)-inspired only.
 
 The report covers:
   - Per-class performance metrics with 95 % bootstrap CIs
@@ -28,7 +29,8 @@ import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 from sklearn.metrics import confusion_matrix, roc_auc_score
-from sklearn.model_selection import train_test_split
+from sklearn.model_selection import StratifiedGroupKFold
+from sklearn.base import clone
 from sklearn.preprocessing import label_binarize
 import joblib
 
@@ -38,8 +40,17 @@ _HERE        = os.path.dirname(os.path.abspath(__file__))
 ROOT         = os.path.dirname(_HERE)
 sys.path.insert(0, _HERE)
 
+# Reuse the exact deployed decision logic rather than re-deriving it here.
+from ecg_phase1 import FEATURE_KEYS
+from ecg_phase2 import classify_ecg
+from ecg_phase3 import ML_CLASSES
+from ecg_analyzer import _canonical_diagnosis
+
 CLASSES      = ["Normal", "AFib", "PVC", "Bradycardia", "Tachycardia"]
 N_CLASSES    = len(CLASSES)
+# Classes the ML sub-model predicts (Normal/AFib/PVC). Bradycardia/Tachycardia
+# are rule-owned (see ecg_phase3.ML_CLASSES).
+RATE_CLASSES = tuple(c for c in range(N_CLASSES) if c not in ML_CLASSES)  # (3, 4)
 RANDOM_STATE = 42
 N_BOOTSTRAP  = 2000   # iterations for 95 % CI
 
@@ -49,6 +60,41 @@ MODEL_PATH   = os.path.join(ROOT, "models",  "ecg_model.joblib")
 DATASET_PATH = os.path.join(ROOT, "data",    "ecg_dataset_cache.npz")
 REPORT_PATH  = os.path.join(REPORTS_DIR, "ecg_clinical_validation_report.txt")
 REPORT_JSON  = os.path.join(REPORTS_DIR, "ecg_clinical_validation_report.json")
+
+
+# =============================================================================
+# 0. HYBRID PREDICTOR (what actually ships)
+# =============================================================================
+
+def hybrid_predict(X: np.ndarray, clf) -> np.ndarray:
+    """
+    Predict class indices with the DEPLOYED decision path (predict_combined),
+    operating on cached feature vectors instead of raw signals.
+
+    Rules first (Phase 2): if they emit a canonical 5-class diagnosis
+    (Normal/AFib/Bradycardia/Tachycardia), use it. PVC and rule-INCONCLUSIVE
+    windows fall through to the ML sub-model (`clf`, trained on ML_CLASSES).
+
+    Note on scoring: the shipped tool may return "INCONCLUSIVE" when both the
+    rules abstain and ML confidence < CONFIDENCE_THRESHOLD. For a scorable
+    confusion matrix we take the ML best guess in that case (forced choice), so
+    every window gets a class in 0..4. This can only understate the deployed
+    system's caution, never overstate its accuracy on windows it does decide.
+    """
+    raw = clf.predict_proba(X)
+    proba = np.zeros((len(X), N_CLASSES))
+    for col_idx, cls_idx in enumerate(clf.classes_):
+        proba[:, cls_idx] = raw[:, col_idx]
+
+    preds = np.empty(len(X), dtype=int)
+    for i in range(len(X)):
+        features = {k: float(X[i, j]) for j, k in enumerate(FEATURE_KEYS)}
+        canon = _canonical_diagnosis(classify_ecg(features)["diagnosis"])
+        if canon in CLASSES:
+            preds[i] = CLASSES.index(canon)         # rule owns this window
+        else:                                       # INCONCLUSIVE / VT -> ML
+            preds[i] = int(np.argmax(proba[i]))
+    return preds, proba
 
 
 # =============================================================================
@@ -149,17 +195,21 @@ def dangerous_misclassifications(cm: np.ndarray) -> list:
     """
     Check for clinically dangerous misclassifications.
 
-    Definition: a HIGH-severity arrhythmia classified as Normal or vice versa.
-    Dangerous pairs (true -> pred):
-      VT    -> Normal
-      AFib  -> Normal
-      VT    -> Bradycardia  (could delay pacing)
+    Two dangerous patterns are checked:
+      (a) any arrhythmia read as Normal   -> the arrhythmia is missed entirely
+      (b) arrhythmia read as a DIFFERENT arrhythmia that changes management
+          (e.g. AFib -> PVC: AFib needs anticoagulation, PVC often benign)
+
+    Class indices: 0=Normal, 1=AFib, 2=PVC, 3=Bradycardia, 4=Tachycardia.
+    (There is no separate VT class in this 5-class model.)
     """
-    # Class indices: 0=Normal, 1=AFib, 2=PVC, 3=Brady, 4=Tachy
     dangerous = [
-        (4, 0),   # VT -> Normal
-        (1, 0),   # AFib -> Normal
-        (4, 3),   # VT -> Bradycardia
+        (1, 0),   # AFib        -> Normal   (missed AFib: stroke risk)
+        (2, 0),   # PVC         -> Normal   (missed ventricular ectopy)
+        (3, 0),   # Bradycardia -> Normal   (missed brady: may need pacing)
+        (4, 0),   # Tachycardia -> Normal   (missed tachyarrhythmia)
+        (1, 2),   # AFib        -> PVC      (dangerous substitution)
+        (4, 2),   # Tachycardia -> PVC      (dangerous substitution)
     ]
     found = []
     for (true_idx, pred_idx) in dangerous:
@@ -206,13 +256,27 @@ def clinical_safety_stats(y_true: np.ndarray, y_pred: np.ndarray) -> dict:
     tn = int(np.sum((y_true == 0) & (y_pred == 0)))
     fpr = fp / (fp + tn) if (fp + tn) > 0 else 0.0
 
+    # Arrhythmia flagged as SOME arrhythmia but the WRONG class (e.g. AFib->PVC).
+    # The FNR above misses these entirely (they are non-Normal, so not "missed"),
+    # which is exactly how the old metric hid AFib->PVC substitutions. Surface
+    # them: total arrhythmia error = missed (->Normal) + substituted (->other).
+    subs   = int(np.sum((y_true != 0) & (y_pred != 0) & (y_pred != y_true)))
+    total_arr = fn + tp
+    sub_rate  = subs / total_arr if total_arr > 0 else 0.0
+    arr_err   = fn + subs
+    arr_err_rate = arr_err / total_arr if total_arr > 0 else 0.0
+
     return {
         "false_negative_rate": round(fnr * 100, 2),   # %
         "false_positive_rate": round(fpr * 100, 2),   # %
         "missed_arrhythmias" : fn,
-        "total_arrhythmias"  : fn + tp,
+        "total_arrhythmias"  : total_arr,
         "false_alarms"       : fp,
         "total_normals"      : fp + tn,
+        "arrhythmia_substitutions": subs,             # arrhythmia -> wrong arrhythmia
+        "substitution_rate_pct"   : round(sub_rate * 100, 2),
+        "misclassified_arrhythmias": arr_err,         # missed + substituted
+        "arrhythmia_error_rate_pct": round(arr_err_rate * 100, 2),
         "fnr_target_pct"     : 12.0,
         "fpr_target_pct"     :  8.0,
         "fnr_pass"           : fnr * 100 < 12.0,
@@ -261,13 +325,19 @@ def generate_report(y_true: np.ndarray, y_pred: np.ndarray,
     # Title
     h1("CLINICAL VALIDATION SUMMARY")
     lines.append(f"  Device        : Portable ECG Monitor with Arrhythmia Detector")
-    lines.append(f"  Algorithm     : Pan-Tompkins + Random Forest (5-class)")
+    lines.append("  Algorithm     : Pan-Tompkins + hybrid (Phase 2 rules -> Random Forest)")
+    lines.append("                  ML owns Normal/AFib/PVC; rules own Bradycardia/Tachycardia")
     lines.append(f"  Report date   : {now}")
-    lines.append(f"  Intended use  : Screening of adult patients for common arrhythmias")
-    lines.append(f"  Regulatory    : FDA 510(k) -- Class II Medical Device")
+    lines.append(f"  Intended use  : Research/education screening prototype (adults)")
+    lines.append(f"  Regulatory    : NOT FDA cleared -- not a medical device")
 
     # 1. Per-class performance
-    h2("1. PER-CLASS PERFORMANCE (test set)")
+    h2("1. PER-CLASS PERFORMANCE (5-fold record-level cross-validation, out-of-fold)")
+    lines.append("  Leakage-free: a patient's overlapping windows never span train/test.")
+    lines.append("  Metrics are for the HYBRID pipeline that ships (rules -> ML fallback).")
+    lines.append("  Normal/AFib/PVC are ML-decided; Bradycardia/Tachycardia are rule-decided")
+    lines.append("  (rate rules): their sensitivity reflects how often the HR rule fires on")
+    lines.append("  MIT-BIH's few, borderline rate-class records, not an ML failure.")
     hdr = (f"  {'Class':<18} {'Sens%':>7} {'95% CI':>16}  "
            f"{'Spec%':>7} {'95% CI':>16}  "
            f"{'Prec%':>7}  {'F1%':>7}  {'N':>5}")
@@ -286,6 +356,8 @@ def generate_report(y_true: np.ndarray, y_pred: np.ndarray,
         spec_ci = (f"{spec['ci_low']*100:.1f}-{spec['ci_high']*100:.1f}")
 
         flag = ""
+        if CLASSES.index(cname) in RATE_CLASSES:
+            flag += " [rule-owned]"
         if sens["value"] < 0.85:
             flag += " [SENS BELOW TARGET]"
             targets_met = False
@@ -300,7 +372,7 @@ def generate_report(y_true: np.ndarray, y_pred: np.ndarray,
             f"{f1['value']*100:7.1f}  {n:5d}{flag}"
         )
 
-    lines.append(f"\n  Overall ROC-AUC (macro OvR): {overall_roc_auc:.4f}"
+    lines.append(f"\n  ML sub-model ROC-AUC (Normal/AFib/PVC, macro OvR): {overall_roc_auc:.4f}"
                  + (" [BELOW TARGET 0.90]" if overall_roc_auc < 0.90 else "  [OK]"))
 
     # 2. Confusion matrix
@@ -353,6 +425,25 @@ def generate_report(y_true: np.ndarray, y_pred: np.ndarray,
         f"  False alarms       : {safety['false_alarms']} / "
         f"{safety['total_normals']} normal recordings"
     )
+    lines.append(
+        f"  Arrhythmia -> wrong arrhythmia (e.g. AFib->PVC): "
+        f"{safety['arrhythmia_substitutions']} "
+        f"({safety['substitution_rate_pct']:.1f}% of arrhythmias)"
+    )
+    lines.append(
+        f"  Total arrhythmia error (missed + substituted): "
+        f"{safety['misclassified_arrhythmias']} / {safety['total_arrhythmias']} "
+        f"({safety['arrhythmia_error_rate_pct']:.1f}%)"
+    )
+    lines.append(
+        "  NOTE: FNR above counts only arrhythmia->Normal. A substitution keeps"
+    )
+    lines.append(
+        "  a non-Normal label yet can still change management, so it is reported"
+    )
+    lines.append(
+        "  separately here rather than folded into a single PASS/FAIL."
+    )
 
     h2("4b. DANGEROUS MISCLASSIFICATION CHECK")
     lines.append(f"  {'True class':<18} {'Predicted as':<18} {'Count':>7}  {'Status':>6}")
@@ -391,18 +482,19 @@ def generate_report(y_true: np.ndarray, y_pred: np.ndarray,
     lines.append(
         "  This device is FOR SCREENING PURPOSES ONLY and is NOT a diagnostic tool.\n"
         "  All results must be reviewed by a qualified healthcare professional before\n"
-        "  any clinical decision is made.  The manufacturer does not accept liability\n"
-        "  for decisions made solely on the basis of this device's output.\n\n"
-        "  Intended for use as a Class II medical device under FDA 510(k) pathway.\n"
-        "  Substantial equivalence predicate: cleared ambulatory ECG monitors."
+        "  any clinical decision is made.  The authors accept no liability for\n"
+        "  decisions made solely on the basis of this software's output.\n\n"
+        "  This is a research/education prototype. It is NOT FDA cleared, NOT a\n"
+        "  medical device, and has NO substantial-equivalence predicate. The\n"
+        "  report format is FDA-510(k)-inspired for educational purposes only."
     )
 
     h2("7. SUMMARY")
-    lines.append(f"  Test set size    : {len(y_true)} samples")
+    lines.append(f"  CV samples (OOF) : {len(y_true)} samples")
     lines.append(f"  Overall accuracy : {accuracy_pct:.1f}%")
     lines.append(f"  Macro sens       : {macro_sens_pct:.1f}%")
     lines.append(f"  Macro spec       : {macro_spec_pct:.1f}%")
-    lines.append(f"  ROC-AUC          : {overall_roc_auc:.4f}")
+    lines.append(f"  ML ROC-AUC       : {overall_roc_auc:.4f}  (Normal/AFib/PVC)")
     lines.append(f"  Performance targets met : {'YES' if targets_met else 'NO -- see above'}")
     lines.append(f"  Clinical safety  : {'PASS' if all_safe else 'FAIL'}")
     lines.append("")
@@ -449,25 +541,40 @@ def run_phase5():
     model = joblib.load(MODEL_PATH)
     data  = np.load(DATASET_PATH)
     X, y  = data["X"], data["y"]
+    if "record_ids" not in data.files:
+        print("  [ERROR] Dataset cache has no 'record_ids' (legacy cache).")
+        print("  Rebuild it:  python run_all.py --phase 3   (without --skip-build)")
+        return
+    record_ids = data["record_ids"]
     print(f"  X shape: {X.shape}  |  Classes: {np.unique(y, return_counts=True)}")
 
-    # Reproduce the same test split used in Phase 3 (same random_state)
-    X_trainval, X_test, y_trainval, y_test = train_test_split(
-        X, y, test_size=0.15, stratify=y, random_state=RANDOM_STATE
-    )
-    print(f"  Test set: {len(X_test)} samples")
-
-    # ---- Predictions ----------------------------------------------------
-    print("[2] Running predictions on test set ...")
-    y_pred  = model.predict(X_test)
-    y_proba = model.predict_proba(X_test)
+    # ---- Leakage-free evaluation of the HYBRID pipeline -----------------
+    # Estimate generalization with record-level 5-fold cross-validation, so a
+    # patient's overlapping windows never span train and test. Predictions are
+    # collected out-of-fold: every sample is predicted by a system that never saw
+    # its record. Each fold trains a clone of the deployed model on that fold's
+    # ML_CLASSES rows (Normal/AFib/PVC), then predicts every test window through
+    # the *hybrid* path (Phase 2 rules first, ML fallback) — the same logic that
+    # ships in predict_combined. Bradycardia/Tachycardia are therefore scored on
+    # the deterministic rules, not on an ML model that never trains on them.
+    print("[2] Running record-level 5-fold CV of the hybrid pipeline (out-of-fold) ...")
+    y_true = y
+    y_pred  = np.full(len(y), -1, dtype=int)
+    y_proba = np.zeros((len(y), N_CLASSES))
+    sgkf = StratifiedGroupKFold(n_splits=5, shuffle=True, random_state=RANDOM_STATE)
+    for fold, (tr, te) in enumerate(sgkf.split(X, y, groups=record_ids), 1):
+        ml = np.isin(y[tr], ML_CLASSES)          # train ML on learnable classes only
+        clf = clone(model).fit(X[tr][ml], y[tr][ml])
+        y_pred[te], y_proba[te] = hybrid_predict(X[te], clf)
+        print(f"    fold {fold}: train={int(ml.sum())} (ml) / {len(tr)}  test={len(te)}")
+    print(f"  Out-of-fold predictions: {len(y_true)} samples")
 
     # ---- Confusion matrix -----------------------------------------------
-    cm = confusion_matrix(y_test, y_pred, labels=list(range(N_CLASSES)))
+    cm = confusion_matrix(y_true, y_pred, labels=list(range(N_CLASSES)))
 
     # ---- Overall metrics ------------------------------------------------
     from sklearn.metrics import accuracy_score
-    acc = accuracy_score(y_test, y_pred)
+    acc = accuracy_score(y_true, y_pred)
     accuracy_pct = acc * 100
 
     # Macro sensitivity and specificity
@@ -482,15 +589,11 @@ def run_phase5():
     macro_sens_pct = np.mean(sens_list) * 100
     macro_spec_pct = np.mean(spec_list) * 100
 
-    # ROC-AUC
-    y_bin = label_binarize(y_test, classes=list(range(N_CLASSES)))
-    # Expand y_proba to full class range (model may be missing classes, e.g., AFib)
-    y_proba_full = np.zeros((len(y_test), N_CLASSES))
-    for col_idx, cls_idx in enumerate(model.classes_):
-        y_proba_full[:, cls_idx] = y_proba[:, col_idx]
-    y_proba = y_proba_full
-
-    present = np.unique(y_test)
+    # ROC-AUC of the ML sub-model (Normal/AFib/PVC only). y_proba carries real
+    # probabilities for ML_CLASSES; the rate classes are rule-decided and have no
+    # ML score (their columns are 0), so including them would be meaningless.
+    y_bin = label_binarize(y_true, classes=list(range(N_CLASSES)))
+    present = np.array([c for c in np.unique(y_true) if c in ML_CLASSES])
     try:
         roc_auc = roc_auc_score(
             y_bin[:, present], y_proba[:, present],
@@ -505,19 +608,19 @@ def run_phase5():
     for c, cname in enumerate(CLASSES):
         print(f"    {cname} ...")
         per_class_metrics[cname] = per_class_metrics_with_ci(
-            y_test, y_pred, c, n_iter=N_BOOTSTRAP
+            y_true, y_pred, c, n_iter=N_BOOTSTRAP
         )
 
     # ---- Failure & safety analysis --------------------------------------
     print("[4] Analysing failures ...")
     confusions = failure_analysis(cm)
     dangerous  = dangerous_misclassifications(cm)
-    safety     = clinical_safety_stats(y_test, y_pred)
+    safety     = clinical_safety_stats(y_true, y_pred)
 
     # ---- Generate text report -------------------------------------------
     print("[5] Generating report ...")
     report_text = generate_report(
-        y_test, y_pred, y_proba, roc_auc,
+        y_true, y_pred, y_proba, roc_auc,
         per_class_metrics, safety, confusions, dangerous, cm
     )
     write_report(report_text, REPORT_PATH)
@@ -526,7 +629,7 @@ def run_phase5():
     # ---- Save JSON summary ----------------------------------------------
     json_data = {
         "timestamp"    : datetime.datetime.now().isoformat(),
-        "test_samples" : int(len(y_test)),
+        "cv_samples"   : int(len(y_true)),
         "accuracy_pct" : round(accuracy_pct, 2),
         "macro_sens_pct": round(macro_sens_pct, 2),
         "macro_spec_pct": round(macro_spec_pct, 2),

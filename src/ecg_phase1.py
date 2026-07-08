@@ -36,6 +36,15 @@ PLOTS_DIR = os.path.join(ROOT, "outputs", "plots")
 # Sampling rate of the MIT-BIH database (fixed at 360 Hz)
 FS = 360   # Hz
 
+# Ordered feature names — the single source of truth for feature column order.
+# LOAD-BEARING: the committed Random Forest (models/ecg_model.joblib) was trained
+# on this exact order. Reorder only if you retrain.
+FEATURE_KEYS = [
+    "hr_mean", "hr_std", "rr_cv", "rr_entropy",
+    "sdnn", "rmssd", "pnn50",
+    "qrs_dur_mean", "qrs_dur_std", "p_wave_ratio", "st_elevation",
+]
+
 
 # =============================================================================
 # 1. DATA LOADING
@@ -64,10 +73,18 @@ def load_mitbih_record(record_id: int, *, duration_s: float = 30.0):
     record = wfdb.rdrecord(record_path, sampto=sampto)
     ann    = wfdb.rdann(record_path, "atr", sampto=sampto)
 
-    # MIT-BIH always has two channels; MLII is channel 0
-    signal = record.p_signal[:, 0].astype(np.float64)
+    # Select the MLII lead by NAME, not position. Most records have MLII on
+    # channel 0, but e.g. record 114 has it on channel 1, and records 102/104
+    # have no MLII at all (V5/V2) — for those we fall back to channel 0 and the
+    # caller is responsible for knowing it's a substitute lead.
+    signal = record.p_signal[:, _mlii_channel(record.sig_name)].astype(np.float64)
 
     return signal, ann, FS
+
+
+def _mlii_channel(sig_names: list) -> int:
+    """Index of the MLII lead, or 0 (substitute lead) if the record has none."""
+    return sig_names.index("MLII") if "MLII" in sig_names else 0
 
 
 def print_record_info(record_id: int, signal: np.ndarray,
@@ -131,7 +148,8 @@ def _moving_window_integration(signal: np.ndarray, fs: int,
 
 
 def detect_r_peaks(signal: np.ndarray, fs: int,
-                   refractory_ms: float = 200.0) -> np.ndarray:
+                   refractory_ms: float = 200.0,
+                   bp: np.ndarray = None) -> np.ndarray:
     """
     Pan & Tompkins (1985) R-peak detector.
 
@@ -154,9 +172,14 @@ def detect_r_peaks(signal: np.ndarray, fs: int,
     Returns
     -------
     r_peaks : 1-D int array of R-peak sample indices
+
+    `bp` is an optional precomputed 5-15 Hz bandpass of `signal`; pass it to avoid
+    recomputing the same filter that feature extraction also needs (see
+    extract_features). When None it is computed here as before.
     """
-    # Step 1 - bandpass
-    bp = _bandpass_filter(signal, fs)
+    # Step 1 - bandpass (reuse a precomputed one if provided)
+    if bp is None:
+        bp = _bandpass_filter(signal, fs)
 
     # Step 2 - derivative
     deriv = _differentiate(bp)
@@ -234,6 +257,13 @@ def _compute_rr_intervals(r_peaks: np.ndarray, fs: int) -> np.ndarray:
     return np.diff(r_peaks).astype(float) * 1000.0 / fs   # ms
 
 
+# Cap on the number of RR intervals fed to the entropy estimate. Sample entropy
+# is inherently O(N^2); this bounds worst-case cost on a long upload (the DoS
+# vector on /api/analyze) while never triggering for the short windows the model
+# was trained on. When exceeded, the most-recent intervals are used.
+SAMPLE_ENTROPY_MAX_INTERVALS = 1000
+
+
 def _sample_entropy(rr: np.ndarray, m: int = 2, r_tol: float = 0.2) -> float:
     """
     Approximate sample entropy of an RR interval sequence.
@@ -241,7 +271,10 @@ def _sample_entropy(rr: np.ndarray, m: int = 2, r_tol: float = 0.2) -> float:
     A high value indicates irregularity (e.g. AFib); a low value indicates
     monotonous rhythm (e.g. sinus tachycardia / bradycardia).
 
-    Uses a simplified O(N^2) implementation suitable for short sequences.
+    Vectorized O(N^2) implementation (numpy pairwise Chebyshev distance). It is
+    numerically identical to the original nested-loop version but avoids the
+    per-pair Python overhead; the interval count is capped for a bounded cost on
+    long signals. See tests/test_signal_processing.py for the parity guard.
 
     Parameters
     ----------
@@ -253,6 +286,10 @@ def _sample_entropy(rr: np.ndarray, m: int = 2, r_tol: float = 0.2) -> float:
     -------
     entropy normalised to [0, 1]
     """
+    rr = np.asarray(rr, dtype=float)
+    if len(rr) > SAMPLE_ENTROPY_MAX_INTERVALS:
+        rr = rr[-SAMPLE_ENTROPY_MAX_INTERVALS:]
+
     N = len(rr)
     if N < m + 2:
         return 0.0
@@ -261,17 +298,21 @@ def _sample_entropy(rr: np.ndarray, m: int = 2, r_tol: float = 0.2) -> float:
         return 0.0
 
     def _phi(m_val):
-        count = 0
-        total = 0
-        for i in range(N - m_val):
-            template = rr[i : i + m_val]
-            for j in range(N - m_val):
-                if i == j:
-                    continue
-                if np.max(np.abs(template - rr[j : j + m_val])) <= r:
-                    count += 1
-            total += 1
-        return count / total if total > 0 else 0
+        # Templates of length m_val: row i is rr[i:i+m_val]. Pairwise Chebyshev
+        # distance D[i,j] = max_k |T[i,k]-T[j,k]|, built column-by-column so only
+        # (M, M) memory is used (m_val is 2 or 3). Matches the reference exactly:
+        # count ordered pairs (i != j) with D <= r, averaged over the M templates.
+        M = N - m_val
+        if M <= 0:
+            return 0.0
+        idx = np.arange(M)[:, None] + np.arange(m_val)[None, :]
+        T = rr[idx]                                   # (M, m_val)
+        D = np.zeros((M, M))
+        for k in range(m_val):
+            col = T[:, k]
+            np.maximum(D, np.abs(col[:, None] - col[None, :]), out=D)
+        count = int((D <= r).sum()) - M               # drop the M self-matches
+        return count / M
 
     phi_m   = _phi(m)
     phi_m1  = _phi(m + 1)
@@ -283,40 +324,70 @@ def _sample_entropy(rr: np.ndarray, m: int = 2, r_tol: float = 0.2) -> float:
     return float(np.clip(raw / 3.0, 0.0, 1.0))
 
 
-def _estimate_qrs_duration(signal: np.ndarray, r_peaks: np.ndarray,
-                            fs: int) -> tuple:
-    """
-    Estimate QRS duration (ms) for each beat.
+# QRS width calibration knobs. The QRS envelope is the 5-15 Hz bandpass signal,
+# squared, then smoothed with a moving-window integrator (Pan-Tompkins style) so
+# it forms one clean hump per beat. Onset/offset are where that hump falls below
+# QRS_WIDTH_FRACTION of the beat's local peak. Tuned so known-normal MIT-BIH 100
+# reads ~90-100 ms. Physical signals need this tuning — keep both knobs.
+#   raise fraction / shrink smooth_ms -> narrower measured QRS
+#   lower fraction / grow  smooth_ms  -> wider measured QRS
+QRS_WIDTH_FRACTION = 0.30
+QRS_SMOOTH_MS      = 60.0
 
-    Method: find the width of the squared, bandpass-filtered signal at
-    50% of the peak height around each R-peak.
+
+def _estimate_qrs_duration(signal: np.ndarray, r_peaks: np.ndarray,
+                            fs: int, frac: float = QRS_WIDTH_FRACTION,
+                            smooth_ms: float = QRS_SMOOTH_MS,
+                            bp: np.ndarray = None) -> tuple:
+    """
+    Estimate QRS duration (ms) per beat as onset-to-offset width.
+
+    Method: build a smooth per-beat energy hump (bandpass -> square -> moving
+    window integration), find its peak near each R-peak, then walk outward until
+    the hump drops below `frac` of that peak. The contiguous onset->offset span
+    is the QRS width. Walking from the peak measures the single QRS deflection,
+    not scattered neighbouring energy — the old squared-signal-at-10%-over-the-
+    whole-window method overread width (every record came out >=115 ms).
 
     Returns
     -------
     mean_ms, std_ms : float, float
     """
-    bp      = _bandpass_filter(signal, fs)
-    squared = bp ** 2
+    if bp is None:
+        bp = _bandpass_filter(signal, fs)
+    squared  = bp ** 2
+    env      = _moving_window_integration(squared, fs, window_ms=smooth_ms)
     durations = []
-    search_ms = 100    # search +/-100 ms around each R-peak
-    search_s  = int(fs * search_ms / 1000)
+    search_s  = int(fs * 0.14)          # +/-140 ms search window
+    local_s   = max(1, int(fs * 0.03))  # +/-30 ms to locate the true peak
 
     for pk in r_peaks:
         lo = max(0, pk - search_s)
-        hi = min(len(squared), pk + search_s + 1)
-        seg = squared[lo:hi]
-        peak_val = seg.max()
-        if peak_val == 0:
+        hi = min(len(env), pk + search_s + 1)
+        seg = env[lo:hi]
+        center = pk - lo
+        # Locate the envelope peak within +/-30 ms of the R-peak
+        c0 = max(0, center - local_s)
+        c1 = min(len(seg), center + local_s + 1)
+        if c1 <= c0:
             continue
-        # Use 10% of peak height threshold (50% is too strict for bandpass-squared signal,
-        # which produces a narrow spike; 10% captures the full QRS energy envelope)
-        threshold_val = 0.10 * peak_val
-        above = np.where(seg >= threshold_val)[0]
-        if len(above) >= 2:
-            width_ms = (above[-1] - above[0]) / fs * 1000.0
-            # Sanity-check: QRS should be 40-200 ms
-            if 40 <= width_ms <= 200:
-                durations.append(width_ms)
+        cmax = c0 + int(np.argmax(seg[c0:c1]))
+        peak_val = seg[cmax]
+        if peak_val <= 0:
+            continue
+        thr = frac * peak_val
+
+        # Walk left/right from the peak to the onset/offset crossings
+        left = cmax
+        while left > 0 and seg[left] >= thr:
+            left -= 1
+        right = cmax
+        while right < len(seg) - 1 and seg[right] >= thr:
+            right += 1
+
+        width_ms = (right - left) / fs * 1000.0
+        if 40 <= width_ms <= 200:       # physiological sanity bound
+            durations.append(width_ms)
 
     if len(durations) == 0:
         return np.nan, np.nan
@@ -386,12 +457,13 @@ def _estimate_st_elevation(signal: np.ndarray, r_peaks: np.ndarray,
         st_deviations.append((st_mv - baseline_mv) * 1000.0)   # mV -> uV
 
     if len(st_deviations) == 0:
-        return 0.0
+        return np.nan   # measurement failure — do NOT report as isoelectric (0.0),
+                        # which would mask a real ST-elevation MI warning downstream
     return float(np.mean(st_deviations))
 
 
 def extract_features(signal: np.ndarray, r_peaks: np.ndarray,
-                     fs: int) -> dict:
+                     fs: int, bp: np.ndarray = None) -> dict:
     """
     Extract 11 clinical ECG features from a signal and its R-peak indices.
 
@@ -418,18 +490,19 @@ def extract_features(signal: np.ndarray, r_peaks: np.ndarray,
     """
     rr = _compute_rr_intervals(r_peaks, fs)
 
-    nan_features = {k: np.nan for k in [
-        "hr_mean", "hr_std", "rr_cv", "rr_entropy",
-        "sdnn", "rmssd", "pnn50",
-        "qrs_dur_mean", "qrs_dur_std", "p_wave_ratio", "st_elevation",
-    ]}
+    nan_features = {k: np.nan for k in FEATURE_KEYS}
 
     if len(rr) < 2:
         return nan_features
 
     # Heart-rate features
     hr_inst = 60_000.0 / rr          # instantaneous bpm for each RR interval
-    hr_mean = float(np.mean(hr_inst))
+    # Rate from the MEDIAN RR interval, not mean(60000/RR). The arithmetic mean
+    # of instantaneous rates is biased high (Jensen's inequality: 1/RR is convex),
+    # which pushed borderline-slow records into the Normal rate band. The median
+    # RR gives an unbiased central rate. hr_std stays the spread of instantaneous
+    # rates as a variability measure.
+    hr_mean = float(60_000.0 / np.median(rr))
     hr_std  = float(np.std(hr_inst, ddof=1))
 
     # RR variability features
@@ -447,8 +520,8 @@ def extract_features(signal: np.ndarray, r_peaks: np.ndarray,
     # pNN50: percentage of successive RR differences > 50 ms
     pnn50 = float(np.mean(np.abs(succ_diff) > 50.0) * 100.0) if len(succ_diff) else np.nan
 
-    # Morphological features
-    qrs_mean, qrs_std = _estimate_qrs_duration(signal, r_peaks, fs)
+    # Morphological features (reuse a precomputed bandpass if the caller passed one)
+    qrs_mean, qrs_std = _estimate_qrs_duration(signal, r_peaks, fs, bp=bp)
     p_ratio           = _estimate_p_wave_ratio(signal, r_peaks, fs)
     st_elev           = _estimate_st_elevation(signal, r_peaks, fs)
 
@@ -538,7 +611,10 @@ def run_phase1():
     n_annotated = sum(1 for s in ann.symbol if s not in ('+','~','|','!'))
     print(f"  Detected   : {len(r_peaks)} R-peaks")
     print(f"  Annotated  : {n_annotated} beats")
-    print(f"  Agreement  : {len(r_peaks)}/{n_annotated}")
+    # Raw count ratio only — NOT beat-to-beat matched sensitivity/PPV. A ratio
+    # near 1.0 means similar counts, not that the same beats were found.
+    ratio = len(r_peaks) / n_annotated if n_annotated else float("nan")
+    print(f"  Count ratio (detected/annotated, not beat-matched): {ratio:.2f}")
 
     assert len(r_peaks) >= 30, (
         f"Expected >=30 R-peaks in 30 s, got {len(r_peaks)}. "

@@ -1,0 +1,22 @@
+[tool.pytest.ini_options]
+# Make src/ and backend/ importable without per-file sys.path hacks.
+pythonpath = ["src", "backend"]
+testpaths = ["tests"]
+addopts = "-ra"
+
+[tool.ruff]
+line-length = 100
+target-version = "py310"
+extend-exclude = [".venv", "outputs", "data", "docs", "frontend"]
+
+[tool.ruff.lint]
+# Conservative default set; the codebase predates linting, so keep the signal
+# high (real bugs / unused code) rather than reformatting everything at once.
+select = ["E", "F", "W", "I", "B"]
+ignore = [
+    "E501",  # line length is handled by the formatter, not enforced here
+    "E741",  # ambiguous var names (e.g. `l`) appear in vectorized math
+]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/*" = ["E402"]  # tests may import after path/setup lines

@@ -35,6 +35,7 @@ from sklearn.ensemble import RandomForestClassifier
 from sklearn.model_selection import (
     StratifiedKFold, StratifiedGroupKFold, GroupShuffleSplit, GridSearchCV, train_test_split
 )
+from sklearn.base import clone
 from sklearn.metrics import (
     confusion_matrix, classification_report,
     roc_auc_score, roc_curve, accuracy_score
@@ -58,7 +59,8 @@ REPORTS_DIR = os.path.join(ROOT, "outputs", "reports")
 # Add src/ to path so we can import Phase 1/2 helpers
 sys.path.insert(0, _HERE)
 from ecg_phase1 import (
-    FS, load_mitbih_record, detect_r_peaks, extract_features
+    FS, FEATURE_KEYS, load_mitbih_record, detect_r_peaks, extract_features,
+    _mlii_channel,
 )
 from ecg_phase2 import classify_ecg
 
@@ -67,6 +69,14 @@ from ecg_phase2 import classify_ecg
 # ---------------------------------------------------------------------------
 CLASSES      = ["Normal", "AFib", "PVC", "Bradycardia", "Tachycardia"]
 N_CLASSES    = len(CLASSES)
+# Classes the Random Forest is trained to predict. Bradycardia (class 3) and
+# Tachycardia (class 4) are rate-defined and, in MIT-BIH, come from a single
+# record (232) and 3 records / 5 windows respectively — unlearnable under
+# record-grouped CV. They are owned by the deterministic Phase 2 rules instead
+# (HR<50 / HR>120), which run before the ML fallback in predict_combined(). The
+# model therefore trains only on Normal/AFib/PVC; predict_proba is still expanded
+# back to all N_CLASSES columns (3/4 stay 0 from ML, filled by the rules).
+ML_CLASSES   = (0, 1, 2)   # Normal, AFib, PVC
 WINDOW_S     = 30.0   # seconds per feature window
 STEP_S       = 15.0   # stride (50 % overlap -> more samples)
 RANDOM_STATE = 42
@@ -86,71 +96,111 @@ ALL_RECORDS = [
 # 1. ANNOTATION-BASED LABELLING
 # =============================================================================
 
-# Beat symbols that count as PVC events
+# Beat symbols that count as PVC (ventricular ectopic) events. PVC is a
+# BEAT-level phenomenon annotated per-beat by the cardiologists, so it is
+# labelled from beat symbols — this is genuine ground truth, not circular.
 PVC_SYMS    = {"V", "r", "E", "F"}
-# Beat symbols that count as atrial ectopics (can hint at AFib context)
-ATRIAL_SYMS = {"A", "a", "J", "S", "e", "j", "n"}
 # Symbols that are not real beats (rhythm/noise markers)
 NON_BEAT    = {"+", "~", "|", "!", "[", "]", "x", "(", ")", "p", "t", "u",
                "`", "'", "^", "Q", "?"}
 
+# MIT-BIH rhythm annotations (aux_note at '+' markers) -> our 5 class indices.
+# This is the actual clinical ground truth. Only rhythms that map cleanly to a
+# target class are kept; everything else (AFL, VT, VFL, paced, nodal, AV block,
+# pre-excitation, atrial bigeminy, ...) makes the window ambiguous -> skipped.
+# NOTE: MIT-BIH '(B' = ventricular BIGEMINY and '(T' = ventricular TRIGEMINY —
+# these are PVC rhythms, NOT brady/tachy. Bradycardia is '(SBR', tachycardia is
+# '(SVTA'. (This corrects a common misreading of the rhythm codes.)
+RHYTHM_TO_CLASS = {
+    "(N":    0,   # normal sinus rhythm            -> Normal
+    "(AFIB": 1,   # atrial fibrillation            -> AFib
+    "(B":    2,   # ventricular bigeminy           -> PVC
+    "(T":    2,   # ventricular trigeminy          -> PVC
+    "(SBR":  3,   # sinus bradycardia              -> Bradycardia
+    "(SVTA": 4,   # supraventricular tachyarrhythmia -> Tachycardia
+}
 
-def label_window(ann_symbols: list, features: dict) -> int | None:
+# A window must be dominated by one rhythm for its rhythm label to be trusted.
+RHYTHM_DOMINANCE = 0.80
+# Fraction of ventricular-ectopic beats above which a window is labelled PVC.
+PVC_FRACTION = 0.15
+
+
+def label_window(beat_symbols: list, dom_rhythm, dom_frac: float) -> int | None:
     """
-    Assign one of the 5 class labels (or None to skip) to a 30-second window.
+    Assign one of the 5 class labels (or None to skip) to a 30-second window,
+    using the cardiologist annotations as ground truth.
 
-    Priority order (mirrors Phase 2 clinical rules):
-      1. PVC      -- >15 % of annotated beats are ventricular ectopics
-      2. AFib     -- feature-based irregularity pattern
-      3. Bradycardia
-      4. Tachycardia
-      5. Normal
+    Ground-truth sources (NOT the model's own features -- avoids circularity):
+      - PVC (2): fraction of ventricular-ectopic BEAT symbols >= PVC_FRACTION.
+      - Normal/AFib/Brady/Tachy: the dominant RHYTHM annotation (aux_note),
+        via RHYTHM_TO_CLASS, when it covers >= RHYTHM_DOMINANCE of the beats.
 
-    Returns None for ambiguous windows to keep the training set clean.
+    PVC beats override only Normal/PVC/unlabelled rhythm windows, so frequent
+    isolated PVCs in sinus rhythm are caught, without stealing AFib/Brady/Tachy
+    windows that happen to contain a few ectopics.
+
+    Returns None (skip) for short, mixed-rhythm, or unmapped windows.
     """
-    beats   = [s for s in ann_symbols if s not in NON_BEAT]
+    beats   = [s for s in beat_symbols if s not in NON_BEAT]
     n_beats = len(beats)
     if n_beats < 5:          # too few beats to characterise
         return None
 
     pvc_frac = sum(1 for s in beats if s in PVC_SYMS) / n_beats
 
-    hr      = features.get("hr_mean",      np.nan)
-    rr_cv   = features.get("rr_cv",        np.nan)
-    entropy = features.get("rr_entropy",   np.nan)
-    p_ratio = features.get("p_wave_ratio", np.nan)
-    qrs     = features.get("qrs_dur_mean", np.nan)
-
-    def valid(*vals):
-        return not any(np.isnan(v) for v in vals)
-
-    # 1. PVC
-    if pvc_frac >= 0.15:
+    # PVC from beat annotations (ground truth), but don't override a clearly
+    # non-Normal atrial/rate rhythm.
+    if pvc_frac >= PVC_FRACTION and dom_rhythm in (None, 0, 2):
         return 2
 
-    # 2. AFib (high RR irregularity + absent P-waves)
-    if (valid(rr_cv, entropy, p_ratio) and
-            rr_cv > 0.25 and entropy > 0.75 and p_ratio < 0.60):
-        return 1
+    # Otherwise defer to the annotated rhythm, if one clearly dominates.
+    if dom_rhythm is None or dom_frac < RHYTHM_DOMINANCE:
+        return None
+    return dom_rhythm
 
-    # 3. Bradycardia (slow + regular)
-    if valid(hr) and hr < 50:
-        return 3
 
-    # 4. Tachycardia (fast + narrow QRS)
-    if valid(hr, qrs) and hr > 120 and qrs < 120:
-        return 4
+def _rhythm_events(ann) -> list:
+    """
+    Extract (sample, class_or_None) rhythm-change events from an annotation.
 
-    # 5. Normal (strict criteria for clean labels)
-    if (valid(hr, rr_cv, qrs, p_ratio) and
-            60 <= hr <= 100 and
-            rr_cv < 0.12 and
-            qrs < 120 and
-            p_ratio > 0.85):
-        return 0
+    Rhythm changes are '+' beat markers whose aux_note holds a code like '(AFIB.
+    Codes outside RHYTHM_TO_CLASS map to None (an explicit 'unknown rhythm from
+    here' marker, so a window in an unmapped rhythm is skipped rather than
+    inheriting the previous rhythm).
+    """
+    events = []
+    aux = getattr(ann, "aux_note", None)
+    if aux is None:
+        return events
+    for i in range(len(ann.sample)):
+        note = (aux[i] or "").replace("\x00", "").strip()
+        if note.startswith("("):
+            events.append((int(ann.sample[i]), RHYTHM_TO_CLASS.get(note, None)))
+    return events
 
-    # Ambiguous -- skip
-    return None
+
+def _dominant_rhythm(events: list, beat_samples: list):
+    """
+    Given sorted rhythm-change events and the beat sample indices in a window,
+    return (dominant_class_or_None, dominant_fraction).
+
+    Each beat inherits the rhythm of the most recent event at/before it; the
+    dominant class is the most common across the window's beats.
+    """
+    if not beat_samples:
+        return None, 0.0
+    counts = {}
+    for s in beat_samples:
+        cls = None
+        for ev_sample, ev_cls in events:
+            if ev_sample <= s:
+                cls = ev_cls
+            else:
+                break
+        counts[cls] = counts.get(cls, 0) + 1
+    dom_cls = max(counts, key=counts.get)
+    return dom_cls, counts[dom_cls] / len(beat_samples)
 
 
 # =============================================================================
@@ -169,12 +219,6 @@ def build_dataset(verbose: bool = True) -> tuple:
     record_ids : ndarray, shape (n_samples,)  [for record-level stratification]
     """
     import wfdb
-
-    FEATURE_KEYS = [
-        "hr_mean", "hr_std", "rr_cv", "rr_entropy",
-        "sdnn", "rmssd", "pnn50",
-        "qrs_dur_mean", "qrs_dur_std", "p_wave_ratio", "st_elevation",
-    ]
 
     X_rows      = []
     y_labels    = []
@@ -195,12 +239,23 @@ def build_dataset(verbose: bool = True) -> tuple:
                 print(f"  [SKIP] Record {rec_id}: {e}")
             continue
 
-        sig_full = record.p_signal[:, 0].astype(np.float64)
+        # Use the MLII lead by name for a consistent morphology across records.
+        # Records without MLII (102, 104: V5/V2) are skipped so the training set
+        # is single-lead-consistent.
+        if "MLII" not in record.sig_name:
+            if verbose:
+                print(f"  [SKIP] Record {rec_id}: no MLII lead "
+                      f"({record.sig_name})")
+            continue
+        sig_full = record.p_signal[:, _mlii_channel(record.sig_name)].astype(np.float64)
         n_total  = len(sig_full)
         duration = n_total / FS
 
         if duration < WINDOW_S:
             continue   # recording too short
+
+        # Ground-truth rhythm-change events for this record (carried forward).
+        rhythm_events = _rhythm_events(ann)
 
         # Sliding windows
         win_samples  = int(WINDOW_S * FS)
@@ -211,8 +266,11 @@ def build_dataset(verbose: bool = True) -> tuple:
             window = sig_full[start:end]
 
             # Annotations that fall within this window
-            mask     = (ann.sample >= start) & (ann.sample < end)
-            w_ann    = [ann.symbol[i] for i in range(len(ann.sample)) if mask[i]]
+            idxs      = [i for i in range(len(ann.sample))
+                         if start <= ann.sample[i] < end]
+            w_symbols = [ann.symbol[i] for i in idxs]
+            beat_samples = [int(ann.sample[i]) for i in idxs
+                            if ann.symbol[i] not in NON_BEAT]
 
             # Detect R-peaks and extract features
             try:
@@ -226,7 +284,9 @@ def build_dataset(verbose: bool = True) -> tuple:
                    for k in ["hr_mean", "rr_cv", "rr_entropy"]):
                 continue
 
-            label = label_window(w_ann, feats)
+            # Label from cardiologist annotations (rhythm + PVC beats)
+            dom_rhythm, dom_frac = _dominant_rhythm(rhythm_events, beat_samples)
+            label = label_window(w_symbols, dom_rhythm, dom_frac)
             if label is None:
                 continue
 
@@ -372,12 +432,7 @@ def evaluate_model(model, X_test: np.ndarray, y_test: np.ndarray,
         roc_auc = float("nan")
 
     # ---- Feature importance ----------------------------------------------
-    feat_names = [
-        "hr_mean", "hr_std", "rr_cv", "rr_entropy",
-        "sdnn", "rmssd", "pnn50",
-        "qrs_dur_mean", "qrs_dur_std", "p_wave_ratio", "st_elevation",
-    ]
-    importances = dict(zip(feat_names, model.feature_importances_))
+    importances = dict(zip(FEATURE_KEYS, model.feature_importances_))
 
     # ---- Print report ----------------------------------------------------
     print(f"\n  {'='*62}")
@@ -561,17 +616,27 @@ def run_phase3(skip_build: bool = False,
         f"Too few samples ({len(X)}) — check DB_PATH: {DB_PATH}"
     )
 
+    # ---- Restrict ML to the learnable classes ---------------------------
+    # The full dataset (all 5 classes) stays cached for Phase 5's hybrid
+    # evaluation. The RF, however, only trains/evaluates on Normal/AFib/PVC;
+    # Bradycardia/Tachycardia are owned by the Phase 2 rules (see ML_CLASSES).
+    ml_mask = np.isin(y, ML_CLASSES)
+    X_ml, y_ml, record_ids_ml = X[ml_mask], y[ml_mask], record_ids[ml_mask]
+    print(f"\n  ML training set (classes {ML_CLASSES}): {len(X_ml)} / {len(X)} windows "
+          f"({int(ml_mask.sum())} kept; {int((~ml_mask).sum())} rate-class windows "
+          f"reserved for the rules)")
+
     # ---- Step 2: splits -------------------------------------------------
-    print("\n[2] Splitting dataset at RECORD level (70 train / 15 val / 15 test) ...")
+    print("\n[2] Splitting ML dataset at RECORD level (70 train / 15 val / 15 test) ...")
 
     # CRITICAL: Split at record level, not window level, to prevent data leakage
     # (adjacent windows from same record must not appear in both train and test)
     gss = GroupShuffleSplit(n_splits=1, test_size=0.15, random_state=RANDOM_STATE)
-    trainval_idx, test_idx = next(gss.split(X, y, groups=record_ids))
+    trainval_idx, test_idx = next(gss.split(X_ml, y_ml, groups=record_ids_ml))
 
-    X_trainval, X_test = X[trainval_idx], X[test_idx]
-    y_trainval, y_test = y[trainval_idx], y[test_idx]
-    record_ids_trainval = record_ids[trainval_idx]
+    X_trainval, X_test = X_ml[trainval_idx], X_ml[test_idx]
+    y_trainval, y_test = y_ml[trainval_idx], y_ml[test_idx]
+    record_ids_trainval = record_ids_ml[trainval_idx]
 
     # Then split train/val from remaining (15 % of trainval ≈ 17.6% of total)
     val_frac = 0.15 / 0.85
@@ -598,12 +663,26 @@ def run_phase3(skip_build: bool = False,
     print("\n[5] Held-out test-set evaluation (final):")
     test_results = evaluate_model(model, X_test, y_test, save_plots=True)
 
-    # ---- Step 6: save model ---------------------------------------------
-    joblib.dump(model, MODEL_PATH)
-    print(f"\n[6] Model saved -> {MODEL_PATH}")
+    # ---- Step 6: refit on ALL ML data and save the deployed model -------
+    # The split above exists only for honest evaluation. The DEPLOYED model is
+    # refit on the full ML dataset (train+val+test, Normal/AFib/PVC) using the
+    # tuned hyperparameters, so it uses every learnable window. Rate classes are
+    # handled by the rules. Phase 5 estimates the hybrid's generalisation via
+    # record-level cross-validation.
+    deployed = clone(model).fit(X_ml, y_ml)
+    joblib.dump(deployed, MODEL_PATH)
+    print(f"\n[6] Deployed model refit on full ML dataset ({len(X_ml)} samples, "
+          f"classes {ML_CLASSES}) -> {MODEL_PATH}")
 
     # ---- Save metrics JSON ----------------------------------------------
     metrics = {
+        "_note": (
+            "Development metrics from a SINGLE record-level hold-out split. "
+            "These are NOT the reported performance figures — a small/imbalanced "
+            "test split can make them optimistic. The reported, leakage-free "
+            "numbers come from Phase 5 record-level cross-validation "
+            "(outputs/reports/ecg_clinical_validation_report.*)."
+        ),
         "validation": {k: (float(v) if isinstance(v, (np.floating, float))
                            else v)
                        for k, v in val_results.items()
@@ -621,6 +700,12 @@ def run_phase3(skip_build: bool = False,
     print(f"  Metrics saved -> {metrics_path}")
 
     # ---- Safety assertion: VT must not be classified as Normal ----------
+    # Checks the actual deployed decision path, not the bare RF in isolation.
+    # ecg_analyzer.predict_combined() always runs Phase 2's rules first and
+    # only falls back to this model when rules are INCONCLUSIVE -- so the
+    # real safety guarantee is "rules catch it, OR (if they don't) the model
+    # doesn't call it Normal". Testing the raw model alone against a vector
+    # rules already catch deterministically is a false alarm, not a real gap.
     print("\n[7] Clinical safety assertion ...")
     vt_features = {
         "hr_mean": 165.0, "hr_std": 4.0, "rr_cv": 0.05, "rr_entropy": 0.20,
@@ -628,18 +713,24 @@ def run_phase3(skip_build: bool = False,
         "qrs_dur_mean": 155.0, "qrs_dur_std": 10.0,
         "p_wave_ratio": 0.25, "st_elevation": 60.0,
     }
-    vt_vec = np.array([[vt_features[k] for k in [
-        "hr_mean", "hr_std", "rr_cv", "rr_entropy",
-        "sdnn", "rmssd", "pnn50",
-        "qrs_dur_mean", "qrs_dur_std", "p_wave_ratio", "st_elevation",
-    ]]])
-    vt_pred = model.predict(vt_vec)[0]
-    assert vt_pred != 0, (
-        f"SAFETY FAIL: VT features predicted as Normal (class 0)! "
-        f"Predicted class: {vt_pred} ({CLASSES[vt_pred]})"
-    )
-    print(f"  [PASS] VT features not classified as Normal "
-          f"(predicted: {CLASSES[vt_pred]})")
+    rule_result = classify_ecg(vt_features)
+    if rule_result["diagnosis"] == "INCONCLUSIVE":
+        vt_vec = np.array([[vt_features[k] for k in FEATURE_KEYS]])
+        vt_pred = deployed.predict(vt_vec)[0]
+        assert vt_pred != 0, (
+            f"SAFETY FAIL: rules were INCONCLUSIVE on VT features and the "
+            f"ML fallback predicted Normal (class 0)! "
+            f"Predicted class: {vt_pred} ({CLASSES[vt_pred]})"
+        )
+        print(f"  [PASS] Rules INCONCLUSIVE; ML fallback not Normal "
+              f"(predicted: {CLASSES[vt_pred]})")
+    else:
+        assert rule_result["diagnosis"] != "Normal Sinus Rhythm", (
+            f"SAFETY FAIL: VT features classified as Normal Sinus Rhythm "
+            f"by clinical rules!"
+        )
+        print(f"  [PASS] VT features caught by clinical rules "
+              f"(diagnosis: {rule_result['diagnosis']}) -- ML never consulted")
 
     print("\n" + "="*65)
     print("  PHASE 3 COMPLETE")

@@ -1,14 +1,15 @@
 {
+  "_note": "Development metrics from a SINGLE record-level hold-out split. These are NOT the reported performance figures \u2014 a small/imbalanced test split can make them optimistic. The reported, leakage-free numbers come from Phase 5 record-level cross-validation (outputs/reports/ecg_clinical_validation_report.*).",
   "validation": {
-    "accuracy": 0.8596491228070176,
-    "macro_sens": 0.3755102040816326,
-    "macro_spec": 0.9488551525396481,
-    "roc_auc": 0.9652173649160819
+    "accuracy": 0.6067588325652842,
+    "macro_sens": 0.29975781364177295,
+    "macro_spec": 0.8867816427577656,
+    "roc_auc": 0.8516934013366052
   },
   "test": {
-    "accuracy": 0.9596412556053812,
-    "macro_sens": 0.5870967741935484,
-    "macro_spec": 0.9907692307692308,
-    "roc_auc": 0.9995037220843672
+    "accuracy": 0.7310344827586207,
+    "macro_sens": 0.3362253514178153,
+    "macro_spec": 0.8962864381892295,
+    "roc_auc": 0.9028331880391526
   }
 }
