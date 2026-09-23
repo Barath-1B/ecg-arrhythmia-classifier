@@ -1,12 +1,20 @@
-# Portable ECG Monitor with Arrhythmia Detector
+<div align="center">
 
-> Upload a raw ECG recording, get a clinical-grade arrhythmia diagnosis in seconds.
+# 🫀 Portable ECG Monitor & Arrhythmia Detector
+
+### Upload a raw ECG recording, get a clinical-grade arrhythmia screen in seconds
 
 [![CI](https://github.com/Barath-1B/ecg-arrhythmia-classifier/actions/workflows/ci.yml/badge.svg)](https://github.com/Barath-1B/ecg-arrhythmia-classifier/actions/workflows/ci.yml)
-![Python](https://img.shields.io/badge/Python-3.9%2B-blue)
-![License](https://img.shields.io/badge/License-MIT-green)
-![React](https://img.shields.io/badge/Frontend-React%2018-61dafb)
-![Flask](https://img.shields.io/badge/Backend-Flask%203-lightgrey)
+
+![Python](https://img.shields.io/badge/Python-3.9+-3776AB?style=for-the-badge&logo=python&logoColor=white)
+![Flask](https://img.shields.io/badge/Flask_3-000000?style=for-the-badge&logo=flask&logoColor=white)
+![scikit-learn](https://img.shields.io/badge/scikit--learn-F7931E?style=for-the-badge&logo=scikitlearn&logoColor=white)
+![React](https://img.shields.io/badge/React_18-20232A?style=for-the-badge&logo=react&logoColor=61DAFB)
+![License](https://img.shields.io/badge/License-MIT-2ea44f?style=for-the-badge)
+
+*Pan–Tompkins R-peak detection · 11 clinical features · hybrid rule + Random Forest classifier · MIT-BIH*
+
+</div>
 
 ---
 
